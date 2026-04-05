@@ -22,7 +22,7 @@ def executar_importacao(job_id: str, payload: dict, jobs: dict):
 
         # ATENÇÃO: Verifique se sua função criar_browser_com_certificado 
         # está configurando o 'client_certificates' no browser.new_context
-        p, browser, context, page, cert_path = criar_browser_com_certificado(
+        p, browser, context, page, cert_path, key_path = criar_browser_com_certificado(
             payload["certificado_base64"],
             payload["certificado_senha"]
         )
