@@ -12,9 +12,28 @@ def consultar_notas(page, data_inicio: str, data_fim: str):
         data_ini_fmt = dt_ini.strftime("%d/%m/%Y")
         data_fim_fmt = dt_fim.strftime("%d/%m/%Y")
 
+        # 🔥 AQUI ESTÁ A MUDANÇA CRÍTICA
+        print("Acessando área protegida (forçando certificado)...")
+
         # =========================
         # ACESSA PÁGINA
         # =========================
+        page.goto(
+            "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
+            wait_until="networkidle",
+            timeout=60000
+        )
+        page.wait_for_timeout(5000)
+
+        print(f"URL após acesso: {page.url}")
+
+        # 🔥 VALIDA SE LOGOU
+        if "Login" in page.url:
+            raise Exception("❌ Certificado não autenticou (continua no login)")
+
+        print("✅ Autenticado com sucesso!")
+
+        # 🔥 AGORA SIM vai para notas
         page.goto(
             "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
             wait_until="networkidle",
