@@ -37,9 +37,6 @@ def consultar_notas(page, competencia: str):
         print(f"Erro na consulta: {e}")
         return []
 
-# No loop de notas, antes de baixar:
-page.wait_for_selector("table tbody tr", timeout=30000)
-
 def baixar_xml(page, nota: dict, download_dir: str):
     try:
         idx = nota["index"]
