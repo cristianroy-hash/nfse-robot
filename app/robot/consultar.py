@@ -41,48 +41,63 @@ def baixar_xml(page, nota: dict, download_dir: str):
     try:
         idx = nota["index"]
         caminho_local = os.path.join(download_dir, f"{nota['numero']}.xml")
-        print(f"-> Disparando download via JS Injection: {nota['numero']}")
+        print(f"-> Tentando baixar nota index {idx}")
 
-        # 1. Executamos um script que faz tudo: abre o menu e clica no download
-        # Isso ignora problemas de visibilidade ou overlays do Playwright
+        # Script injetado que busca o botão de forma exaustiva
         script_download = f"""
         () => {{
             const rows = document.querySelectorAll('table tbody tr');
             const row = rows[{idx}];
-            if (!row) return "ROW_NOT_FOUND";
+            if (!row) return "LINHA_NAO_ENCONTRADA";
 
-            // Acha o botão de ações na linha (última célula)
-            const actionsBtn = row.querySelector('td:last-child button') || 
-                               row.querySelector('td:last-child a') || 
-                               row.querySelector('.dropdown-toggle');
+            // Busca na última e na penúltima célula (onde costumam ficar as ações)
+            const cells = row.querySelectorAll('td');
+            const lastCell = cells[cells.length - 1];
             
-            if (!actionsBtn) return "BTN_NOT_FOUND";
+            // Procura por QUALQUER botão ou link dentro da célula de ações
+            const btn = lastCell.querySelector('button') || 
+                        lastCell.querySelector('a') || 
+                        lastCell.querySelector('.dropdown-toggle') ||
+                        row.querySelector('i.fa-cog')?.parentElement; // Tenta achar pela engrenagem
+
+            if (!btn) return "BTN_NOT_FOUND";
             
-            actionsBtn.click(); // Abre o menu
-            
-            // Pequeno delay para o menu aparecer no DOM e clica no XML
-            setTimeout(() => {{
-                const links = Array.from(document.querySelectorAll('a, button'));
-                const xmlLink = links.find(el => el.innerText.includes('XML'));
-                if (xmlLink) xmlLink.click();
-            }}, 500);
-            
-            return "SUCCESS";
+            btn.click();
+            return "CLICOU";
         }}
         """
 
+        # 1. Abre o menu de ações
+        res = page.evaluate(script_download)
+        if res != "CLICOU":
+            print(f"   [AVISO] {res}. Tentando clique direto via coordenada...")
+            # Fallback: clica no final da linha se o JS não achou o elemento
+            page.locator("table tbody tr").nth(idx).locator("td").last.click()
+        
+        page.wait_for_timeout(2000)
+
+        # 2. Clica no XML (Busca por texto 'XML' em qualquer lugar da tela agora)
         try:
             with page.expect_download(timeout=60000) as download_info:
-                res = page.evaluate(script_download)
-                if res != "SUCCESS":
-                    print(f"   [AVISO] JS retornou: {res}")
+                page.evaluate("""() => {
+                    const links = Array.from(document.querySelectorAll('a, button, span, li'));
+                    const xmlLink = links.find(el => el.innerText.toUpperCase().includes('XML'));
+                    if (xmlLink) {
+                        xmlLink.click();
+                    } else {
+                        // Se não achar pelo texto, tenta pelo título do atributo
+                        const backup = document.querySelector('[title*="XML"]');
+                        if(backup) backup.click();
+                    }
+                }""")
             
             download = download_info.value
             download.save_as(caminho_local)
-            print(f"   [OK] Download concluído: {nota['numero']}")
+            print(f"   [OK] Sucesso: {nota['numero']}.xml")
             return True
         except Exception as e_dl:
-            print(f"   [ERRO] Timeout no download (site lento ou menu não abriu): {e_dl}")
+            print(f"   [ERRO] Download não disparado. Menu pode não ter aberto: {e_dl}")
+            page.keyboard.press("Escape")
             return False
 
     except Exception as e:
