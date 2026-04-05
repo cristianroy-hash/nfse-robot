@@ -7,32 +7,37 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
     try:
         print(f"Período: {data_inicio} a {data_fim}")
 
-        dt_ini = datetime.strptime(data_inicio, "%Y-%m-%d")
-        dt_fim = datetime.strptime(data_fim, "%Y-%m-%d")
-
-        data_ini_fmt = dt_ini.strftime("%d/%m/%Y")
-        data_fim_fmt = dt_fim.strftime("%d/%m/%Y")
-
-        print(f"Datas formatadas: {data_ini_fmt} a {data_fim_fmt}")
+        # ... (sua formatação de datas continua igual) ...
 
         # =========================
-        # GARANTE LOGIN (fluxo que funcionava)
+        # LOGIN VIA CERTIFICADO (Ajustado)
         # =========================
-        print("Acessando portal raiz...")
+        print("Acessando endpoint de autenticação por certificado...")
+        
+        # Tentamos ir direto para o seletor de certificado
         await page.goto(
-            "https://www.nfse.gov.br/EmissorNacional",
+            "https://www.nfse.gov.br/EmissorNacional/Login/Certificado",
             wait_until="networkidle",
             timeout=60000
         )
 
         await page.wait_for_timeout(5000)
+        print(f"URL após tentativa de login: {page.url}")
 
-        print(f"URL atual: {page.url}")
-
+        # Se ainda cair na tela de login, tentamos clicar no botão de certificado se ele existir
         if "Login" in page.url:
-            raise Exception("❌ Sessão não autenticada")
+            print("Sessão não entrou direto, tentando forçar clique no botão Certificado...")
+            btn_cert = page.locator("a:has-text('Certificado Digital'), button:has-text('Certificado')").first
+            if await btn_cert.count() > 0:
+                await btn_cert.click()
+                await page.wait_for_timeout(5000)
 
-        print("✅ Sessão ativa!")
+        # VALIDAÇÃO FINAL
+        if "Login" in page.url:
+            await page.screenshot(path="/tmp/erro_login_detalhado.png")
+            raise Exception("❌ Sessão não autenticada via Certificado")
+
+        print("✅ Autenticação confirmada!")
 
         # =========================
         # IR PARA NOTAS
