@@ -6,7 +6,6 @@ def consultar_notas(page, data_inicio: str, data_fim: str):
     try:
         print(f"Período: {data_inicio} a {data_fim}")
 
-        # Converte formato YYYY-MM-DD para DD/MM/YYYY
         dt_ini = datetime.strptime(data_inicio, "%Y-%m-%d")
         dt_fim = datetime.strptime(data_fim, "%Y-%m-%d")
         data_ini_fmt = dt_ini.strftime("%d/%m/%Y")
@@ -19,41 +18,28 @@ def consultar_notas(page, data_inicio: str, data_fim: str):
             timeout=60000
         )
         page.wait_for_timeout(3000)
-        print(f"URL atual: {page.url}")
 
-        # Captura os inputs de data disponíveis
-        inputs = page.evaluate("""() => {
-            return Array.from(document.querySelectorAll('input')).map(i => ({
-                id: i.id, name: i.name, type: i.type,
-                class: i.className, placeholder: i.placeholder,
-                value: i.value
-            }));
-        }""")
-        print(f"Inputs disponíveis: {inputs}")
+        # Preenche usando IDs corretos descobertos no diagnóstico
+        print("Preenchendo data inicial...")
+        campo_ini = page.locator("#datainicio")
+        campo_ini.click()
+        campo_ini.triple_click()
+        page.keyboard.type(data_ini_fmt, delay=80)
+        page.keyboard.press("Tab")
+        page.wait_for_timeout(500)
 
-        # Preenche data inicial
-        try:
-            campo_ini = page.locator("input").nth(0)
-            campo_ini.click()
-            campo_ini.fill("")
-            page.keyboard.type(data_ini_fmt, delay=80)
-            page.keyboard.press("Tab")
-            page.wait_for_timeout(500)
-            print(f"Data inicial preenchida: {data_ini_fmt}")
-        except Exception as e:
-            print(f"Erro ao preencher data inicial: {e}")
+        print("Preenchendo data final...")
+        campo_fim = page.locator("#datafim")
+        campo_fim.click()
+        campo_fim.triple_click()
+        page.keyboard.type(data_fim_fmt, delay=80)
+        page.keyboard.press("Tab")
+        page.wait_for_timeout(500)
 
-        # Preenche data final
-        try:
-            campo_fim = page.locator("input").nth(1)
-            campo_fim.click()
-            campo_fim.fill("")
-            page.keyboard.type(data_fim_fmt, delay=80)
-            page.keyboard.press("Tab")
-            page.wait_for_timeout(500)
-            print(f"Data final preenchida: {data_fim_fmt}")
-        except Exception as e:
-            print(f"Erro ao preencher data final: {e}")
+        # Verifica valores preenchidos
+        val_ini = page.locator("#datainicio").input_value()
+        val_fim = page.locator("#datafim").input_value()
+        print(f"Valores nos campos: {val_ini} a {val_fim}")
 
         # Clica em Filtrar
         print("Clicando em Filtrar...")
@@ -83,7 +69,7 @@ def consultar_notas(page, data_inicio: str, data_fim: str):
 
         print(f"Notas encontradas: {len(notas_raw)}")
         for n in notas_raw:
-            print(f"  {n['competencia']} — {n['chave_acesso'][-10:] if n['chave_acesso'] else 'N/A'}")
+            print(f"  {n['competencia']} — ...{n['chave_acesso'][-10:]}")
 
         return notas_raw
 
