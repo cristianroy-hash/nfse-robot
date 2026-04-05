@@ -1,10 +1,19 @@
 fastapi==0.111.0
 uvicorn==0.29.0
+
+# Playwright
 playwright==1.46.0
-python-dotenv==1.0.1
-cryptography==42.0.5
+
+# HTTP / async
 httpx==0.27.0
+anyio==4.3.0
+
+# Certificado
+cryptography==41.0.7
+
+# Supabase
 supabase==2.4.6
-redis==5.0.4
-rq==1.16.2
+
+# Utils
+python-dotenv==1.0.1
 python-multipart==0.0.9
