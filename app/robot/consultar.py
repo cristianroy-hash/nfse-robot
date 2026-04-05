@@ -41,41 +41,36 @@ def baixar_xml(page, nota: dict, download_dir: str):
     try:
         idx = nota["index"]
         caminho_local = os.path.join(download_dir, f"{nota['numero']}.xml")
+        print(f"Baixando nota: {nota['numero']}")
+
+        # 1. Abre o menu de ações usando o índice
+        # Buscamos o botão que abre o dropdown na linha correta
+        linha = page.locator("table tbody tr").nth(idx)
+        btn_acoes = linha.locator(".dropdown-toggle, button, a[data-toggle]").first
         
-        # Tenta clicar no botão de ações
-        success_click = page.evaluate(f"""(index) => {{
-            const rows = document.querySelectorAll('table tbody tr');
-            if(!rows[index]) return false;
-            const btn = rows[index].querySelector('.dropdown-toggle') || rows[index].querySelector('button');
-            if (btn) {{ btn.click(); return true; }}
-            return false;
-        }}""", idx)
+        # Clique forçado para garantir que o menu abra
+        btn_acoes.click(force=True, timeout=10000)
+        page.wait_for_timeout(1500)
 
-        if not success_click: return False
-        page.wait_for_timeout(2000)
-
-        # Clica no Download XML
+        # 2. Clica no Download XML
+        # O seletor "has-text" é o mais infalível para esse portal
+        link_xml = page.locator("a:has-text('Download XML')").first
+        
         try:
-            with page.expect_download(timeout=30000) as download_info:
-                # O seletor exato do seu print: "<> Download XML"
-                page.evaluate("""() => {
-                    const links = Array.from(document.querySelectorAll('a, button'));
-                    const dlLink = links.find(el => el.innerText.includes('Download XML'));
-                    if (dlLink) el.click(); else {
-                        // fallback para qualquer link de download
-                        const backup = document.querySelector('a[href*="Download/NFSe"]');
-                        if(backup) backup.click();
-                    }
-                }""")
+            with page.expect_download(timeout=45000) as download_info:
+                # Se o clique normal falhar, o force=True ignora se o menu está 'meio' aberto
+                link_xml.click(force=True)
             
             download = download_info.value
             download.save_as(caminho_local)
+            print(f"Arquivo salvo com sucesso: {nota['numero']}.xml")
             return True
-        except Exception as e_dl:
-            print(f"Erro no clique de download: {e_dl}")
+        except Exception as e_inner:
+            print(f"Não conseguiu disparar o download: {e_inner}")
             page.keyboard.press("Escape")
             return False
 
     except Exception as e:
-        print(f"Erro processamento: {e}")
+        print(f"Erro no processo de download: {e}")
+        page.keyboard.press("Escape")
         return False
