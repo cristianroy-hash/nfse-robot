@@ -4,7 +4,8 @@ import re
 def consultar_notas(page, competencia: str):
     try:
         print(f"--- INICIANDO CAPTURA (Competência {competencia}) ---")
-        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle", timeout=60000)
+        # Aumentamos o timeout para garantir carga completa
+        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle", timeout=90000)
         page.wait_for_selector("table tbody tr", timeout=30000)
         
         notas = page.evaluate("""() => {
@@ -24,26 +25,36 @@ def baixar_xml(page, nota: dict, download_dir: str):
         idx = nota["index"]
         print(f"-> Acionando menu de ações da nota {idx}...")
 
-        # 1. Localiza a linha e clica no botão de ações (geralmente o último td ou um botão de engrenagem)
-        # Vamos tentar clicar no último elemento da linha que costuma abrir o popover
-        linha = page.locator("table tbody tr").nth(idx)
-        botao_acoes = linha.locator("td").last
-        botao_acoes.click()
+        # 1. Mira no botão de ações dentro da última célula
+        # Muitas vezes é um elemento com classe 'btn' ou um ícone 'fa-cog' / 'fa-list'
+        celula_acoes = page.locator("table tbody tr").nth(idx).locator("td").last
         
-        # 2. Aguarda o popover aparecer (conforme sua descoberta: .popover-content)
+        # Tenta clicar no botão específico dentro da célula, se não houver, clica na célula
+        botao = celula_acoes.locator("button, a, i").first
+        if botao.count() > 0:
+            botao.click(force=True)
+        else:
+            celula_acoes.click(force=True)
+        
+        # 2. Aguarda o popover aparecer (com tolerância maior e sem checar visibilidade estrita)
         print("   Aguardando menu flutuante (.popover-content)...")
-        page.wait_for_selector(".popover-content", timeout=10000)
-        
-        # 3. Busca o link de download dentro do popover
-        # Usamos uma busca por links que contenham "Download/NFSe"
+        try:
+            page.wait_for_selector(".popover-content", state="attached", timeout=15000)
+        except:
+            print("   [AVISO] Popover não detectado via seletor padrão. Tentando clique alternativo...")
+            # Plano B: Clica em qualquer lugar da linha para ver se o menu brota
+            page.locator("table tbody tr").nth(idx).click()
+            page.wait_for_timeout(2000)
+
+        # 3. Extração do link via JavaScript direto no DOM (mais rápido que o seletor do Playwright)
         href = page.evaluate("""() => {
-            const link = document.querySelector('.popover-content a[href*="Download/NFSe"]');
+            // Procura em qualquer lugar da página por um link de download de NFSe
+            const link = document.querySelector('a[href*="Download/NFSe"], .popover-content a[href*="Download"]');
             return link ? link.href : null;
         }""")
 
         if href:
-            print(f"   [SUCESSO] Link de download capturado!")
-            # Extraímos o ID do link para dar nome ao arquivo
+            print(f"   [SUCESSO] Link capturado: {href[:60]}...")
             id_nota = href.split('/')[-1]
             caminho_local = os.path.join(download_dir, f"{id_nota}.xml")
 
@@ -51,17 +62,13 @@ def baixar_xml(page, nota: dict, download_dir: str):
                 page.goto(href)
             
             download_info.value.save_as(caminho_local)
-            print(f"   [OK] XML {id_nota} salvo!")
-            
-            # Fecha o popover clicando fora ou esperando sumir
-            page.keyboard.press("Escape")
+            print(f"   [OK] XML salvo!")
             return True
         else:
-            print("   [ERRO] Link de download não encontrado dentro do popover.")
+            print("   [ERRO] Link de download não encontrado na página após clique.")
             return False
 
     except Exception as e:
         print(f"   [FALHA] {e}")
-        # Tenta resetar a página para a próxima nota
         page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas")
         return False
