@@ -5,7 +5,7 @@ def login_certificado(page):
         # Tenta acessar direto o painel — se o certificado for aceito 
         # automaticamente via mTLS, não precisa clicar em nada
         page.goto(
-            "https://www.nfse.gov.br/EmissorNacional",
+            "https://www.nfse.gov.br/EmissorNacional/Certificado",
             wait_until="domcontentloaded",
             timeout=60000
         )
