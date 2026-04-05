@@ -1,19 +1,18 @@
-from fastapi import FastAPI, HTTPException, Security
-from fastapi.security import APIKeyHeader
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from app.routes.importar import router
-import os
 
 app = FastAPI(title="NFS-e Robot")
 
-API_KEY = os.environ.get("ROBOT_API_KEY")
-api_key_header = APIKeyHeader(name="X-API-Key")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-async def verificar_api_key(key: str = Security(api_key_header)):
-    if key != API_KEY:
-        raise HTTPException(status_code=403, detail="API Key inválida")
-    return key
-
-app.include_router(router, dependencies=[Security(verificar_api_key)])
+app.include_router(router)
 
 @app.get("/health")
 def health():
