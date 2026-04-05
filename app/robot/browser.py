@@ -2,14 +2,17 @@ import tempfile
 import os
 import base64
 from playwright.sync_api import sync_playwright
-from OpenSSL import crypto
+from cryptography.hazmat.primitives.serialization import pkcs12, Encoding, PrivateFormat, NoEncryption
 
 def pfx_para_pem(certificado_base64: str, senha: str):
     cert_bytes = base64.b64decode(certificado_base64)
-    pfx = crypto.load_pkcs12(cert_bytes, senha.encode())
     
-    cert_pem = crypto.dump_certificate(crypto.FILETYPE_PEM, pfx.get_certificate())
-    key_pem = crypto.dump_privatekey(crypto.FILETYPE_PEM, pfx.get_privatekey())
+    private_key, certificate, _ = pkcs12.load_key_and_certificates(
+        cert_bytes, senha.encode()
+    )
+    
+    cert_pem = certificate.public_bytes(Encoding.PEM)
+    key_pem = private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
     
     cert_file = tempfile.NamedTemporaryFile(suffix=".pem", delete=False)
     cert_file.write(cert_pem)
