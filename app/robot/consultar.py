@@ -1,20 +1,26 @@
 import os
-import re
+import time
 
 def consultar_notas(page, competencia: str):
     try:
         print(f"--- INICIANDO CAPTURA (Competência {competencia}) ---")
-        # Aumentamos o timeout para garantir carga completa
-        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle", timeout=90000)
-        page.wait_for_selector("table tbody tr", timeout=30000)
+        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle", timeout=60000)
         
+        # Aguarda a tabela e garante que as linhas existam
+        page.wait_for_selector("table tbody tr", timeout=30000)
+        page.wait_for_timeout(2000)
+
         notas = page.evaluate("""() => {
             return Array.from(document.querySelectorAll('table tbody tr'))
-                .map((row, i) => ({ index: i, texto: row.innerText }))
+                .map((row, i) => ({ 
+                    index: i, 
+                    texto: row.innerText 
+                }))
                 .filter(r => r.texto.length > 10 && !r.texto.includes('Nenhum registro'))
                 .map(r => ({ index: r.index, numero: `nota_${r.index}` }));
         }""")
-        print(f"Notas detectadas na tabela: {len(notas)}")
+        
+        print(f"Notas detectadas: {len(notas)}")
         return notas
     except Exception as e:
         print(f"Erro na consulta: {e}")
@@ -23,52 +29,52 @@ def consultar_notas(page, competencia: str):
 def baixar_xml(page, nota: dict, download_dir: str):
     try:
         idx = nota["index"]
-        print(f"-> Acionando menu de ações da nota {idx}...")
+        print(f"-> Acionando nota {idx} para revelar menu...")
 
-        # 1. Mira no botão de ações dentro da última célula
-        # Muitas vezes é um elemento com classe 'btn' ou um ícone 'fa-cog' / 'fa-list'
-        celula_acoes = page.locator("table tbody tr").nth(idx).locator("td").last
+        # 1. Clica na linha para ativar a classe 'selecionada' e abrir o popover
+        linha = page.locator("table tbody tr").nth(idx)
+        linha.click()
         
-        # Tenta clicar no botão específico dentro da célula, se não houver, clica na célula
-        botao = celula_acoes.locator("button, a, i").first
-        if botao.count() > 0:
-            botao.click(force=True)
-        else:
-            celula_acoes.click(force=True)
-        
-        # 2. Aguarda o popover aparecer (com tolerância maior e sem checar visibilidade estrita)
-        print("   Aguardando menu flutuante (.popover-content)...")
-        try:
-            page.wait_for_selector(".popover-content", state="attached", timeout=15000)
-        except:
-            print("   [AVISO] Popover não detectado via seletor padrão. Tentando clique alternativo...")
-            # Plano B: Clica em qualquer lugar da linha para ver se o menu brota
-            page.locator("table tbody tr").nth(idx).click()
-            page.wait_for_timeout(2000)
+        # 2. Pequena pausa para o sistema injetar o HTML do popover que você viu
+        page.wait_for_timeout(2000)
 
-        # 3. Extração do link via JavaScript direto no DOM (mais rápido que o seletor do Playwright)
+        # 3. Busca o link XML usando a estrutura exata que você encontrou no console
+        # Procuramos por um link que contenha 'Download/NFSe' (XML) e NÃO 'DANFSe' (PDF)
         href = page.evaluate("""() => {
-            // Procura em qualquer lugar da página por um link de download de NFSe
-            const link = document.querySelector('a[href*="Download/NFSe"], .popover-content a[href*="Download"]');
-            return link ? link.href : null;
+            // Busca o link dentro do popover ou em qualquer lugar que tenha aparecido após o clique
+            const links = Array.from(document.querySelectorAll('a[href*="Download/NFSe"]'));
+            // Filtra para garantir que pegamos o XML e não o DANFSe (PDF)
+            const linkXml = links.find(a => a.href.includes('/Download/NFSe/') && !a.href.includes('DANFSe'));
+            return linkXml ? linkXml.href : null;
         }""")
 
         if href:
-            print(f"   [SUCESSO] Link capturado: {href[:60]}...")
+            # Extrai o ID (aquela sequência longa de números) para o nome do arquivo
             id_nota = href.split('/')[-1]
+            print(f"   [SUCESSO] Link XML localizado: ...{id_nota[-10:]}")
             caminho_local = os.path.join(download_dir, f"{id_nota}.xml")
 
-            with page.expect_download(timeout=60000) as download_info:
-                page.goto(href)
-            
-            download_info.value.save_as(caminho_local)
-            print(f"   [OK] XML salvo!")
-            return True
+            # 4. Realiza o download
+            try:
+                with page.expect_download(timeout=60000) as download_info:
+                    page.goto(href)
+                
+                download = download_info.value
+                download.save_as(caminho_local)
+                print(f"   [OK] Arquivo XML salvo!")
+                
+                # Clica fora ou aperta ESC para fechar o popover e não atrapalhar a próxima
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(1000)
+                return True
+            except Exception as e_dl:
+                print(f"   [ERRO] Falha no download do arquivo: {e_dl}")
+                return False
         else:
-            print("   [ERRO] Link de download não encontrado na página após clique.")
+            print(f"   [ERRO] Não foi possível encontrar o link XML no popover da nota {idx}")
+            # Tira um print interno (opcional) ou tenta voltar
             return False
 
     except Exception as e:
-        print(f"   [FALHA] {e}")
-        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas")
+        print(f"   [FALHA NO PROCESSO] {e}")
         return False
