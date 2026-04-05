@@ -8,88 +8,93 @@ def consultar_notas(page, competencia: str):
         ano, mes = int(ano_str), int(mes_str)
         ultimo_dia = monthrange(ano, mes)[1]
         
-        # O portal costuma preferir o formato sem barras ou com barras dependendo do script
-        # Vamos usar o formato DD/MM/YYYY que é o padrão visual
-        data_inicio = f"01/{mes:02d}/{ano}"
-        data_fim = f"{ultimo_dia:02d}/{mes:02d}/{ano}"
+        # Formato que o portal mais aceita via digitação
+        data_inicio = f"01{mes:02d}{ano}"
+        data_fim = f"{ultimo_dia:02d}{mes:02d}{ano}"
         
-        print(f"Buscando notas de {data_inicio} até {data_fim}")
+        print(f"Tentando acessar consulta: {data_inicio} a {data_fim}")
 
-        # 2. Navegar para a URL de Notas Emitidas
-        # Forçamos o recarregamento para garantir que a sessão do certificado está ativa
-        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle", timeout=60000)
+        # 2. Navegação com tentativa de "desbloqueio"
+        # Vamos para a página de notas emitidas
+        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(5000)
+
+        # Se houver algum botão de "Entrar" ou "Contribuinte" sobrando, clicamos
+        if page.locator("text=Contribuinte").is_visible():
+            page.locator("text=Contribuinte").first.click()
+            page.wait_for_timeout(2000)
+
+        # 3. Localizar os campos de data (Busca por texto de Label)
+        # Em vez de 'input[name]', vamos buscar o input que está PERTO do texto 'Data de Início'
+        print("Buscando campos de data via labels...")
         
-        # 3. Esperar o formulário de filtros
-        # Às vezes o ID do campo tem prefixos. Vamos usar seletores mais genéricos.
-        print("Aguardando formulário de filtros...")
-        
-        # Tentamos múltiplos seletores para o campo de data
-        input_inicio = page.locator("input[id*='DataInicio'], input[name*='DataInicio'], .datepicker-input").first
-        
-        # Espera o elemento estar não só presente, mas visível e editável
-        input_inicio.wait_for(state="visible", timeout=30000)
-        
-        # 4. Preenchimento assistido (Clica, limpa e digita)
-        print("Preenchendo filtros...")
+        # Tentativa 1: Localizar pelo texto do Label (mais humano)
+        try:
+            input_inicio = page.get_by_label("Data de Início").first or \
+                           page.get_by_label("Período de Emissão - Início").first or \
+                           page.get_by_placeholder("Data Inicial").first
+            
+            input_inicio.wait_for(state="visible", timeout=15000)
+        except:
+            # Tentativa 2: Seletor Genérico se o Label falhar
+            print("Label não encontrado, tentando seletores de fallback...")
+            input_inicio = page.locator("input[type='text']").nth(0) # Geralmente o primeiro campo de texto na tela de filtros
+
+        # 4. Preenchimento
+        print("Preenchendo datas...")
         input_inicio.click()
         page.keyboard.press("Control+A")
         page.keyboard.press("Backspace")
-        input_inicio.type(data_inicio, delay=100)
+        page.keyboard.type(data_inicio, delay=100)
         
-        input_fim = page.locator("input[id*='DataFim'], input[name*='DataFim']").first
-        input_fim.click()
-        page.keyboard.press("Control+A")
-        page.keyboard.press("Backspace")
-        input_fim.type(data_fim, delay=100)
-        
-        # Tab para sair do campo e disparar eventos de validação do portal
+        # O campo de fim costuma ser o próximo (Tab) ou o segundo input
         page.keyboard.press("Tab")
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(500)
+        page.keyboard.type(data_fim, delay=100)
+        page.keyboard.press("Enter")
 
-        # 5. Clicar no botão Filtrar
-        # O botão pode estar como 'Filtrar' ou apenas um ícone
-        botao_filtrar = page.locator("button:has-text('Filtrar'), .btn-primary:has-text('Filtrar'), button[type='submit']").first
-        botao_filtrar.click()
+        # 5. Clicar em Filtrar
+        # Se o Enter não bastar, clicamos no botão
+        btn_filtrar = page.locator("button:has-text('Filtrar'), .btn-primary:has-text('Filtrar')").first
+        if btn_filtrar.is_visible():
+            btn_filtrar.click()
         
-        # 6. Aguardar carregamento da tabela
-        print("Aguardando resultados...")
+        # 6. Captura de Resultados
+        print("Aguardando tabela...")
         page.wait_for_timeout(5000)
 
         notas = []
-        # Espera a tabela de resultados ou a mensagem de "Nenhum registro"
-        # O seletor 'table tbody tr' é o mais comum
+        # O portal pode demorar a renderizar a tabela
         linhas = page.locator("table tbody tr").all()
         
         for i, linha in enumerate(linhas):
             texto = linha.inner_text().strip()
             if not texto or "Nenhum registro" in texto:
-                print("Nenhuma nota encontrada para este período.")
-                break
+                continue
             
             colunas = linha.locator("td").all()
-            if len(colunas) > 1:
-                # Geralmente o número da nota está na coluna 0 ou 1
-                numero = colunas[0].inner_text().strip()
+            if len(colunas) >= 1:
+                numero = colunas[0].inner_text().split('\n')[0].strip()
                 notas.append({"numero": numero, "linha": linha, "index": i})
 
-        print(f"Sucesso: {len(notas)} notas encontradas.")
+        print(f"Sucesso: {len(notas)} notas listadas.")
         return notas
 
     except Exception as e:
-        # Tira screenshot do estado atual da tela para vermos o que travou
-        page.screenshot(path="/tmp/erro_detalhado_consulta.png")
+        # Essencial para entender o que o robô está vendo no Railway
+        page.screenshot(path="/tmp/erro_view.png")
         raise Exception(f"Falha ao consultar notas: {str(e)}")
 
 def baixar_xml(page, nota: dict, download_dir: str):
     try:
-        # No portal nacional, as ações ficam num botão de 'três pontos' ou 'engrenagem'
-        # Vamos tentar clicar no último botão da linha (geralmente é o de ações)
-        btn_acoes = nota["linha"].locator("button").last
+        # Clique no menu de ações (três pontos)
+        # Em algumas telas é um ícone de 'lupa' ou 'engrenagem'
+        btn_acoes = nota["linha"].locator("button, a").last
         btn_acoes.click()
-        page.wait_for_timeout(1500)
+        page.wait_for_timeout(1000)
 
-        # Clica no texto "Download XML" que aparece no menu suspenso
         with page.expect_download(timeout=30000) as download_info:
+            # Tentamos baixar pelo texto exato que você mencionou
             page.locator("text=Download XML").first.click()
         
         download = download_info.value
