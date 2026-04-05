@@ -46,10 +46,10 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
         data_fim = payload.get("data_fim")
         periodo_str = f"{data_inicio}_{data_fim}"
 
-        # Criar browser com certificado
-        p, browser, context, page, cert_path, key_path = criar_browser_com_certificado(
-            payload["certificado_base64"],
-            payload["certificado_senha"]
+       # ADICIONADO O AWAIT AQUI:
+        p, browser, context, page, cert_path, key_path = await criar_browser_com_certificado(
+        payload["certificado_base64"],
+        payload["certificado_senha"]
         )
 
         # Realiza login (Se for async no seu robot, use await)
