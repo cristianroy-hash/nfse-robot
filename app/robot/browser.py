@@ -34,10 +34,10 @@ def criar_browser_com_certificado(certificado_base64: str, senha: str):
 
     # USANDO certPath e keyPath (resolve o mac verify failure)
     context = browser.new_context(
-        client_certificates=[{
-            "origin": "https://www.nfse.gov.br",
-            "certPath": cert_path,
-            "keyPath": key_path
+    client_certificates=[{
+        "origin": "https://www.nfse.gov.br", # O Playwright aplicará a todos os caminhos desta origem
+        "certPath": cert_path,
+        "keyPath": key_path
         }]
     )
 
