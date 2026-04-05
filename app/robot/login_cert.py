@@ -1,56 +1,64 @@
 def login_certificado(page):
     try:
-        print("Acessando portal NFS-e...")
+        print("Acessando portal NFS-e com certificado...")
+        
+        # Tenta acessar direto o painel — se o certificado for aceito 
+        # automaticamente via mTLS, não precisa clicar em nada
         page.goto(
-            "https://www.nfse.gov.br/EmissorNacional/Login?ReturnUrl=%2fEmissorNacional",
+            "https://www.nfse.gov.br/EmissorNacional",
             wait_until="domcontentloaded",
             timeout=60000
         )
-        page.wait_for_timeout(3000)
-        print(f"URL atual: {page.url}")
-        print(f"Título da página: {page.title()}")
+        page.wait_for_timeout(4000)
+        
+        url_atual = page.url
+        titulo = page.title()
+        html = page.content()
+        print(f"URL: {url_atual}")
+        print(f"Título: {titulo}")
+        print(f"HTML (2000 chars): {html[:2000]}")
 
-        # Tenta diferentes seletores para o botão de certificado
-        seletores = [
-            "text=Acesso com certificado digital",
-            "text=Certificado Digital",
-            "text=certificado",
-            "a[href*='certificado']",
-            "button[class*='certificado']",
-            "input[type='submit'][value*='ertificado']"
-        ]
+        # Se foi redirecionado para login, tenta clicar no botão
+        if "Login" in url_atual:
+            print("Redirecionou para login, tentando clicar no botão...")
+            
+            # Aguarda um pouco mais para a página carregar completamente
+            page.wait_for_timeout(3000)
+            
+            # Tira screenshot para debug
+            page.screenshot(path="/tmp/login_page.png")
+            print("Screenshot salvo em /tmp/login_page.png")
+            
+            el = page.query_selector("text=Acesso com certificado digital")
+            if el:
+                el.click()
+                page.wait_for_timeout(8000)
+                print(f"URL após clique: {page.url}")
+                html2 = page.content()
+                print(f"HTML após clique (2000 chars): {html2[:2000]}")
+            else:
+                print("Botão não encontrado — HTML da página:")
+                print(html[:3000])
 
-        clicou = False
-        for seletor in seletores:
-            try:
-                el = page.query_selector(seletor)
-                if el:
-                    print(f"Botão encontrado com seletor: {seletor}")
-                    el.click()
-                    clicou = True
-                    break
-            except:
-                continue
-
-        if not clicou:
-            # Captura o HTML da página para debugar
-            html = page.content()
-            print(f"HTML da página (primeiros 2000 chars): {html[:2000]}")
-            raise Exception("Botão de certificado digital não encontrado na página")
-
-        print("Botão clicado, aguardando redirecionamento...")
-        page.wait_for_timeout(5000)
-        print(f"URL após clique: {page.url}")
-
-        # Verifica se já está logado
-        if "EmissorNacional" in page.url and "Login" not in page.url:
+        # Verifica se está logado
+        url_final = page.url
+        print(f"URL final: {url_final}")
+        
+        if "Login" not in url_final and "EmissorNacional" in url_final:
             print("Login realizado com sucesso!")
             return True
+        
+        # Verifica se tem elementos do painel na página
+        painel = page.query_selector("text=Emitir NFS-e") or \
+                 page.query_selector("text=Consultar NFS-e") or \
+                 page.query_selector("text=Sair") or \
+                 page.query_selector("text=Logout")
+        
+        if painel:
+            print("Painel encontrado — login OK!")
+            return True
 
-        # Aguarda mais tempo para o redirecionamento
-        page.wait_for_url("**/EmissorNacional**", timeout=60000)
-        print("Login com certificado realizado com sucesso!")
-        return True
+        raise Exception(f"Não foi possível confirmar o login. URL final: {url_final}")
 
     except Exception as e:
         raise Exception(f"Falha no login com certificado: {str(e)}")
