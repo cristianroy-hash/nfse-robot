@@ -6,18 +6,19 @@ def consultar_notas(page, competencia: str):
         print(f"--- INICIANDO CAPTURA (Competência {competencia}) ---")
         page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle", timeout=60000)
         
+        # Aguarda a tabela aparecer
         page.wait_for_selector("table tbody tr", timeout=30000)
         page.wait_for_timeout(2000)
 
-        # Apenas detecta quantas linhas existem
-        total_notas = page.evaluate("document.querySelectorAll('table tbody tr').length")
-        
-        notas_encontradas = []
-        for i in range(total_notas):
-            # Filtra linhas vazias ou de erro
-            texto_linha = page.locator("table tbody tr").nth(i).inner_text()
-            if len(texto_linha) > 10 and "Nenhum registro" not in texto_linha:
-                notas_encontradas.append({"index": i, "numero": f"nota_{i}"})
+        # Detecta linhas válidas (que não sejam mensagens de "vazio")
+        notas_encontradas = page.evaluate("""() => {
+            const rows = Array.from(document.querySelectorAll('table tbody tr'));
+            return rows.map((row, i) => ({
+                index: i,
+                texto: row.innerText
+            })).filter(r => r.texto.length > 10 && !r.texto.includes('Nenhum registro'))
+               .map(r => ({ index: r.index, numero: `nota_${r.index}` }));
+        }""")
 
         print(f"Notas detectadas: {len(notas_encontradas)}")
         return notas_encontradas
@@ -28,49 +29,56 @@ def consultar_notas(page, competencia: str):
 def baixar_xml(page, nota: dict, download_dir: str):
     try:
         idx = nota["index"]
-        print(f"-> Localizando Chave de Acesso para nota {idx}...")
+        print(f"-> Abrindo detalhes da nota {idx}...")
 
-        # 1. Clicar no botão de 'Visualizar/Detalhes' (Geralmente o primeiro ícone ou o número da nota)
-        # Vamos tentar clicar no link que estiver na linha
-        linha = page.locator("table tbody tr").nth(idx)
-        btn_detalhe = linha.locator("a, button").first
-        btn_detalhe.click()
+        # ESTRATÉGIA DE CLIQUE DIRETO NA CÉLULA (Contorna erros de seletor)
+        # Clicamos na primeira célula da linha, onde costuma estar o link/número
+        celula_numero = page.locator("table tbody tr").nth(idx).locator("td").first
+        celula_numero.click(timeout=15000) 
         
-        # 2. Espera os detalhes carregarem e busca a chave (44 dígitos)
-        page.wait_for_timeout(3000)
-        html_detalhes = page.content()
+        # Espera carregar a página de detalhes
+        page.wait_for_timeout(4000)
         
-        match = re.search(r'\d{44}', html_detalhes)
+        # Captura todo o texto da página para achar a chave
+        # Usamos o evaluate para pegar o texto limpo do DOM
+        html_completo = page.evaluate("document.body.innerText")
+        
+        # Busca padrão de 44 dígitos
+        match = re.search(r'\d{44}', html_completo)
         
         if not match:
-            print("   [ERRO] Chave não encontrada nos detalhes. Tentando voltar...")
-            page.go_back() # Tenta voltar para a lista
-            return False
-        
-        chave = match.group(0)
-        print(f"   Chave encontrada: {chave}")
+            print("   [AVISO] Chave não achada no texto. Tentando inspecionar links...")
+            html_links = page.evaluate("document.body.innerHTML")
+            match = re.search(r'\d{44}', html_links)
 
-        # 3. Agora que temos a chave, usamos o 'pulo do gato' da URL direta
-        url_direta = f"https://www.nfse.gov.br/EmissorNacional/NFSes/Download/XML?chaveAcesso={chave}"
-        caminho_local = os.path.join(download_dir, f"{chave}.xml")
+        if match:
+            chave = match.group(0)
+            print(f"   Chave encontrada: {chave}")
+            
+            # URL de download direto (confirmada nos manuais)
+            url_direta = f"https://www.nfse.gov.br/EmissorNacional/NFSes/Download/XML?chaveAcesso={chave}"
+            caminho_local = os.path.join(download_dir, f"{chave}.xml")
 
-        try:
-            with page.expect_download(timeout=60000) as download_info:
-                page.goto(url_direta)
-            
-            download = download_info.value
-            download.save_as(caminho_local)
-            print(f"   [OK] XML salvo via URL direta!")
-            
-            # 4. Volta para a página da lista para processar a próxima
-            page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas")
-            page.wait_for_selector("table tbody tr")
-            return True
-        except Exception as e:
-            print(f"   [ERRO] Download falhou: {e}")
-            page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas")
-            return False
+            try:
+                with page.expect_download(timeout=60000) as download_info:
+                    page.goto(url_direta)
+                
+                download = download_info.value
+                download.save_as(caminho_local)
+                print(f"   [OK] XML salvo!")
+            except Exception as e_dl:
+                print(f"   [ERRO] Falha no download da chave {chave}: {e_dl}")
+        else:
+            print(f"   [ERRO] Chave de 44 dígitos não localizada para nota {idx}")
+
+        # VOLTA PARA A LISTA (Importante para o loop continuar)
+        print("   Voltando para a lista...")
+        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="domcontentloaded")
+        page.wait_for_selector("table tbody tr", timeout=20000)
+        return True # Retornamos True para o loop seguir para a próxima nota
 
     except Exception as e:
-        print(f"   [ERRO FATAL] {e}")
+        print(f"   [ERRO NO PROCESSO] {e}")
+        # Tenta voltar para não travar as próximas
+        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas")
         return False
