@@ -4,78 +4,92 @@ from calendar import monthrange
 def consultar_notas(page, competencia: str):
     try:
         # 1. Preparar as datas (Início e Fim do mês)
-        # Ex: '2026-03' -> ano=2026, mes=3
-        ano, mes = map(int, competencia.split("-"))
+        ano_str, mes_str = competencia.split("-")
+        ano, mes = int(ano_str), int(mes_str)
         ultimo_dia = monthrange(ano, mes)[1]
         
-        data_inicio = f"01{mes:02d}{ano}" # Formato sem barras para o fill costuma ser mais seguro
-        data_fim = f"{ultimo_dia:02d}{mes:02d}{ano}"
+        # Formato DD/MM/YYYY que o portal costuma aceitar melhor visualmente
+        data_inicio = f"01/{mes:02d}/{ano}"
+        data_fim = f"{ultimo_dia:02d}/{mes:02d}/{ano}"
         
-        print(f"Iniciando fluxo: {data_inicio} até {data_fim}")
+        print(f"Iniciando busca: {data_inicio} até {data_fim}")
 
-        # 2. Navegar para o Painel (após login já realizado)
-        # Se já estiver na página, o goto apenas confirma
-        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle")
+        # 2. Garantir que estamos na home do emissor e esperar o painel
+        page.goto("https://www.nfse.gov.br/EmissorNacional/", wait_until="domcontentloaded")
         
-        # 3. Clicar no botão "NFS-e Emitidas" 
-        # (Caso o goto não tenha caído direto, reforçamos o clique no menu)
-        btn_emitidas = page.get_by_role("link", name="NFS-e Emitidas") or \
-                       page.locator("text=NFS-e Emitidas")
-        btn_emitidas.first.click()
-        page.wait_for_timeout(2000)
+        # Espera qualquer sinal de que o login foi processado (procure por um texto comum no painel)
+        page.wait_for_selector("text=Sair", timeout=30000)
 
+        # 3. Clicar em "NFS-e Emitidas" usando um seletor de texto mais flexível
+        # Tentamos clicar no link que contém o texto, independente de ser 'role link' ou não
+        print("Acessando área de Notas Emitidas...")
+        area_emitidas = page.locator("text=NFS-e Emitidas").first
+        area_emitidas.click(timeout=30000)
+        
         # 4. Preencher Data Inicial e Final
-        # No portal, os nomes costumam ser 'DataInicio' e 'DataFim'
-        print("Preenchendo filtros de data...")
-        page.wait_for_selector("input[name='DataInicio']", timeout=15000)
+        # Usamos wait_for_load_state para garantir que o formulário de filtro carregou
+        page.wait_for_load_state("networkidle")
         
-        page.fill("input[name='DataInicio']", data_inicio)
-        page.fill("input[name='DataFim']", data_fim)
+        print("Preenchendo datas...")
+        # Seletores por ID ou Name costumam ser mais estáveis após o clique
+        input_inicio = page.locator("input[name='DataInicio'], input#DataInicio").first
+        input_fim = page.locator("input[name='DataFim'], input#DataFim").first
+        
+        input_inicio.wait_for(state="visible", timeout=20000)
+        
+        # Limpa e preenche
+        input_inicio.fill("")
+        input_inicio.type(data_inicio, delay=100)
+        
+        input_fim.fill("")
+        input_fim.type(data_fim, delay=100)
         
         # 5. Clicar no botão "Filtrar"
-        page.get_by_role("button", name="Filtrar").click()
+        # Às vezes o botão tem o nome 'Filtrar' ou 'Pesquisar'
+        btn_filtrar = page.locator("button:has-text('Filtrar'), button:has-text('Pesquisar')").first
+        btn_filtrar.click()
         
-        # Aguarda a tabela atualizar
-        page.wait_for_timeout(4000)
+        # 6. Aguarda os resultados
+        print("Aguardando resultados da tabela...")
+        page.wait_for_timeout(5000)
 
-        # 6. Coleta as linhas da tabela resultante
         notas = []
+        # Localiza as linhas da tabela (ignorando o cabeçalho)
         linhas = page.locator("table tbody tr").all()
         
         for i, linha in enumerate(linhas):
-            texto = linha.inner_text()
-            if "Nenhum registro" in texto:
-                break
+            texto_linha = linha.inner_text()
+            if "Nenhum registro" in texto_linha or not texto_linha.strip():
+                continue
             
-            # Tenta pegar o número da nota na primeira coluna
+            # Pega o número da nota (geralmente na primeira coluna)
             colunas = linha.locator("td").all()
-            numero = colunas[0].inner_text().strip() if colunas else f"nota_{i}"
-            
-            notas.append({
-                "numero": numero,
-                "linha": linha,
-                "index": i
-            })
+            if len(colunas) > 0:
+                numero = colunas[0].inner_text().strip()
+                notas.append({
+                    "numero": numero,
+                    "linha": linha,
+                    "index": i
+                })
 
-        print(f"Notas encontradas: {len(notas)}")
+        print(f"Sucesso: {len(notas)} notas encontradas.")
         return notas
 
     except Exception as e:
-        page.screenshot(path="/tmp/erro_fluxo_consulta.png")
+        page.screenshot(path="/tmp/erro_consulta_detalhado.png")
+        print(f"Erro capturado. Screenshot salvo em /tmp/erro_consulta_detalhado.png")
         raise Exception(f"Falha ao consultar notas: {str(e)}")
 
 
 def baixar_xml(page, nota: dict, download_dir: str):
     try:
-        # 1. Clicar no ícone de 3 botões/pontos (Ações)
-        # Geralmente é um botão no final da linha ou um ícone de engrenagem/menu
-        btn_acoes = nota["linha"].locator("button[title='Ações']").first or \
-                    nota["linha"].locator(".btn-group button").first
-        
+        # 1. Localiza o botão de ações (os 3 pontos/engrenagem)
+        # Procure por um botão dentro da linha da nota
+        btn_acoes = nota["linha"].locator("button").last # Geralmente o último botão da linha são as ações
         btn_acoes.click()
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(1500)
 
-        # 2. Selecionar "Download XML" no menu que abriu
+        # 2. Clica no item de menu "Download XML"
         with page.expect_download(timeout=30000) as download_info:
             page.locator("text=Download XML").first.click()
         
