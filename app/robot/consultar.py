@@ -43,43 +43,45 @@ def baixar_xml(page, nota: dict, download_dir: str):
         caminho_local = os.path.join(download_dir, f"{nota['numero']}.xml")
         print(f"-> Tentando baixar nota index {idx} ({nota['numero']})")
 
-        # 1. Localiza TODOS os botões de ações (dropdowns) da página
-        # O seletor .dropdown-toggle é o padrão desse portal para os três pontos
-        botoes_acoes = page.locator(".dropdown-toggle, button[data-toggle='dropdown'], .btn-sm i.fa-cog, .btn-sm i.fa-ellipsis-v")
-        
-        if botoes_acoes.count() <= idx:
-            print(f"   [ERRO] Botão de ação para o índice {idx} não encontrado.")
-            return False
+        # 1. Localiza a linha da nota novamente para garantir foco
+        linha = page.locator("table tbody tr").nth(idx)
+        linha.scroll_into_view_if_needed()
 
-        # 2. Clica no botão correspondente ao índice da nota
-        print(f"   Abrindo menu de ações...")
-        botoes_acoes.nth(idx).click(force=True, timeout=15000)
+        # 2. SELETOR ULTRA-ABRANGENTE:
+        # Procuramos por qualquer botão, link ou ícone que pareça um menu de ações
+        # dentro da linha específica da nota.
+        btn_acoes = linha.locator("button, a, i").filter(has_text="").filter(
+            lambda el: el.get_attribute("class") and ("dropdown" in el.get_attribute("class") or "cog" in el.get_attribute("class") or "ellipsis" in el.get_attribute("class"))
+        ).first
         
-        # Espera o menu expandir
-        page.wait_for_timeout(2000)
+        # Caso o filtro acima seja muito restrito, tentamos o clique direto na última célula
+        # onde geralmente ficam as ações (baseado no seu print)
+        if not btn_acoes.is_visible():
+             btn_acoes = linha.locator("td").last.locator("a, button").first
 
-        # 3. Localizar o link de XML que APARECEU na tela
-        # Agora buscamos o link de forma global, pois o menu dropdown costuma ser 
-        # renderizado no final do HTML, fora da tabela.
-        link_xml = page.locator("a:has-text('Download XML')").first
+        print(f"   Abrindo menu de ações via clique forçado...")
+        # Usamos dispatch_event para garantir que o clique ocorra mesmo se houver algo na frente
+        btn_acoes.dispatch_event("click")
         
-        # Fallback caso o texto varie
-        if not link_xml.is_visible():
-            link_xml = page.locator("a[href*='Download/NFSe']").first
+        page.wait_for_timeout(2500) # Tempo extra para o menu abrir
 
-        print(f"   Clicando no link de download...")
+        # 3. Localizar o link de XML de forma agressiva
+        # Procuramos por qualquer elemento que contenha 'XML' no texto ou no atributo
+        link_xml = page.locator("a:has-text('XML'), button:has-text('XML'), [title*='XML']").first
+
+        print(f"   Disparando download...")
         
         try:
             with page.expect_download(timeout=60000) as download_info:
-                # Usamos dispatch_event('click') como cartada final se o click() falhar
-                link_xml.dispatch_event("click")
+                # O segredo: usamos o clique de evento do JS para evitar que o menu feche antes do tempo
+                page.evaluate("el => el.click()", link_xml.element_handle())
             
             download = download_info.value
             download.save_as(caminho_local)
-            print(f"   [OK] Nota {nota['numero']} salva com sucesso!")
+            print(f"   [SUCESSO] Arquivo salvo: {nota['numero']}.xml")
             return True
         except Exception as e_dl:
-            print(f"   [ERRO] Falha ao capturar download: {e_dl}")
+            print(f"   [ERRO] O clique no download falhou ou o site não respondeu: {e_dl}")
             page.keyboard.press("Escape")
             return False
 
