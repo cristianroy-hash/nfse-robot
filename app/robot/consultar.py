@@ -43,47 +43,47 @@ def baixar_xml(page, nota: dict, download_dir: str):
         caminho_local = os.path.join(download_dir, f"{nota['numero']}.xml")
         print(f"-> Tentando baixar nota index {idx} ({nota['numero']})")
 
-        # 1. Garantir que a linha está visível e centralizada
-        linha = page.locator("table tbody tr").nth(idx)
-        linha.scroll_into_view_if_needed()
+        # 1. Localiza TODOS os botões de ações (dropdowns) da página
+        # O seletor .dropdown-toggle é o padrão desse portal para os três pontos
+        botoes_acoes = page.locator(".dropdown-toggle, button[data-toggle='dropdown'], .btn-sm i.fa-cog, .btn-sm i.fa-ellipsis-v")
         
-        # 2. Clicar no botão de Ações (Dropdown)
-        # No print, é aquele botão na última coluna
-        btn_acoes = linha.locator("button.dropdown-toggle, a.dropdown-toggle, .btn-sm").first
+        if botoes_acoes.count() <= idx:
+            print(f"   [ERRO] Botão de ação para o índice {idx} não encontrado.")
+            return False
+
+        # 2. Clica no botão correspondente ao índice da nota
+        print(f"   Abrindo menu de ações...")
+        botoes_acoes.nth(idx).click(force=True, timeout=15000)
         
-        # Tentativa de clique com espera
-        btn_acoes.click(force=True, timeout=10000)
-        
-        # Espera o menu aparecer (fundamental!)
+        # Espera o menu expandir
         page.wait_for_timeout(2000)
 
-        # 3. Localizar o link de XML no menu suspenso
-        # Usamos uma expressão regular para ignorar maiúsculas/minúsculas
-        link_xml = page.get_by_role("link").filter(has_text="Download XML").first
+        # 3. Localizar o link de XML que APARECEU na tela
+        # Agora buscamos o link de forma global, pois o menu dropdown costuma ser 
+        # renderizado no final do HTML, fora da tabela.
+        link_xml = page.locator("a:has-text('Download XML')").first
         
-        # Caso o seletor acima falhe, tentamos um seletor CSS de fallback
+        # Fallback caso o texto varie
         if not link_xml.is_visible():
-            link_xml = page.locator("a:has-text('XML')").first
+            link_xml = page.locator("a[href*='Download/NFSe']").first
 
         print(f"   Clicando no link de download...")
         
         try:
             with page.expect_download(timeout=60000) as download_info:
-                # O clique final
-                link_xml.click(force=True, timeout=5000)
+                # Usamos dispatch_event('click') como cartada final se o click() falhar
+                link_xml.dispatch_event("click")
             
             download = download_info.value
             download.save_as(caminho_local)
-            print(f"   [OK] Nota {nota['numero']} salva!")
+            print(f"   [OK] Nota {nota['numero']} salva com sucesso!")
             return True
         except Exception as e_dl:
-            print(f"   [ERRO] O link de download não respondeu: {e_dl}")
-            # Tira um print do erro para diagnóstico se estiver no seu servidor
-            page.screenshot(path=f"/tmp/erro_dl_{idx}.png")
+            print(f"   [ERRO] Falha ao capturar download: {e_dl}")
             page.keyboard.press("Escape")
             return False
 
     except Exception as e:
-        print(f"   [ERRO FATAL] Falha no processo: {e}")
+        print(f"   [ERRO FATAL] {e}")
         page.keyboard.press("Escape")
         return False
