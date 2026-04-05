@@ -1,57 +1,37 @@
+import os
+
 def consultar_notas(page, competencia: str):
     try:
-        ano, mes = competencia.split("-")
+        print(f"--- INICIANDO SCAN DE DIAGNÓSTICO ---")
+        # Forçamos a ida para a página de notas
+        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(5000)
         
-        print(f"Navegando para consulta de notas...")
-        # Aumentei o timeout e mudei para 'networkidle' para garantir que os scripts carregaram
-        page.goto(
-            "https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas",
-            wait_until="networkidle",
-            timeout=90000
-        )
-        page.wait_for_timeout(5000) # Pausa extra para renderização
+        print(f"URL Alcançada: {page.url}")
         
-        print(f"URL alcançada: {page.url}")
-        print(f"Título da página: {page.title()}")
-        
-        # Tira um print do que o robô está vendo AGORA
-        page.screenshot(path="/tmp/debug_consulta.png")
-        print("Screenshot de debug salvo em /tmp/debug_consulta.png")
-
-        # Verifica se há Iframes (comum em portais do governo)
-        frames = page.frames
-        print(f"Total de frames encontrados: {len(frames)}")
-        for i, frame in enumerate(frames):
-            print(f"  Frame {i}: Name={frame.name}, URL={frame.url}")
-
-        # Seu código de scan de elementos (melhorado com logs)
-        elementos = page.evaluate("""() => {
-            const tags = document.querySelectorAll('input, select, button, a, label, span');
-            return Array.from(tags).map(el => ({
-                tag: el.tagName,
-                type: el.type || '',
-                name: el.name || '',
-                id: el.id || '',
-                placeholder: el.placeholder || '',
-                class: el.className || '',
-                text: (el.innerText || el.value || '').substring(0, 50).trim()
-            }));
+        # Scanner para mapearmos a página real
+        dados = page.evaluate("""() => {
+            return {
+                texto: document.body.innerText.substring(0, 1000),
+                inputs: Array.from(document.querySelectorAll('input')).map(i => ({
+                    id: i.id, name: i.name, class: i.className, placeholder: i.placeholder
+                })),
+                buttons: Array.from(document.querySelectorAll('button')).map(b => ({
+                    text: b.innerText, id: b.id
+                }))
+            };
         }""")
         
-        print("--- MAPEAMENTO DE ELEMENTOS ---")
-        for el in elementos:
-            # Filtra apenas elementos que pareçam úteis para não inundar o log
-            if el['id'] or el['name'] or el['text'] or 'data' in el['class'].lower():
-                print(f"  {el}")
+        print(f"TEXTO NA TELA: {dados['texto']}")
+        print(f"INPUTS ENCONTRADOS: {dados['inputs']}")
+        print(f"BOTÕES ENCONTRADOS: {dados['buttons']}")
         
-        # Imprime o HTML para análise profunda
-        html = page.content()
-        print(f"--- HTML PREVIEW (Primeiros 2000 chars) ---")
-        print(html[:2000])
-
-        # Retornamos vazio apenas para esta rodada de testes
-        return []
+        return [] # Retorna lista vazia para não dar erro no loop de notas
 
     except Exception as e:
-        print(f"Erro durante o scan: {str(e)}")
+        print(f"Erro no scan: {str(e)}")
         raise Exception(f"Falha na consulta: {str(e)}")
+
+# Mantenha esta função aqui embaixo para o import_service não quebrar
+def baixar_xml(page, nota: dict, download_dir: str):
+    return True
