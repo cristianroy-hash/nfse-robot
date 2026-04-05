@@ -22,24 +22,22 @@ def consultar_notas(page, data_inicio: str, data_fim: str):
         )
         page.wait_for_timeout(3000)
 
-        # Preenche data inicial usando o ID do campo descoberto via diagnóstico
-        # ID: datainicio — campo tipo text com classe form-control data
+        # Preenche data inicial usando ID descoberto via diagnóstico
         print("Preenchendo data inicial...")
         campo_ini = page.locator("#datainicio")
         campo_ini.click()
-        page.keyboard.press("Control+A")  # Seleciona tudo para sobrescrever valor padrão
-        page.keyboard.type(data_ini_fmt, delay=80)  # Digita lentamente simulando humano
-        page.keyboard.press("Tab")  # Confirma o campo e move para o próximo
+        page.keyboard.press("Control+A")
+        page.keyboard.type(data_ini_fmt, delay=80)
+        page.keyboard.press("Tab")
         page.wait_for_timeout(500)
 
-        # Preenche data final usando o ID do campo descoberto via diagnóstico
-        # ID: datafim — campo tipo text com classe form-control data
+        # Preenche data final usando ID descoberto via diagnóstico
         print("Preenchendo data final...")
         campo_fim = page.locator("#datafim")
         campo_fim.click()
-        page.keyboard.press("Control+A")  # Seleciona tudo para sobrescrever valor padrão
-        page.keyboard.type(data_fim_fmt, delay=80)  # Digita lentamente simulando humano
-        page.keyboard.press("Tab")  # Confirma o campo
+        page.keyboard.press("Control+A")
+        page.keyboard.type(data_fim_fmt, delay=80)
+        page.keyboard.press("Tab")
         page.wait_for_timeout(500)
 
         # Verifica se os valores foram preenchidos corretamente
@@ -50,57 +48,67 @@ def consultar_notas(page, data_inicio: str, data_fim: str):
         # Clica no botão Filtrar para aplicar o período
         print("Clicando em Filtrar...")
         page.locator("button:has-text('Filtrar')").first.click()
-        page.wait_for_timeout(6000)  # Aguarda a tabela recarregar via AJAX
+        page.wait_for_timeout(6000)
 
-        # Diagnóstico após filtrar — verifica o que apareceu na tela
-        texto_pos = page.evaluate("() => document.body.innerText.substring(0, 1500)")
-        print(f"Texto após filtrar: {texto_pos}")
-
-        # Captura o HTML completo da tabela para análise dos seletores
-        html_tabela = page.evaluate("""() => {
-            const t = document.querySelector('table');
-            return t ? t.outerHTML.substring(0, 4000) : 'sem tabela';
-        }""")
-        print(f"HTML tabela após filtrar: {html_tabela}")
-
-        # Captura as notas da tabela extraindo:
-        # - data-id: ID interno da nota no portal
-        # - competencia: data de emissão exibida na primeira coluna
-        # - chave_acesso: número de 44+ dígitos extraído da URL de visualização
-        # - url_download: URL direta para download do XML montada com a chave de acesso
+        # Captura notas usando data-chave descoberto no diagnóstico do HTML
+        # A tabela usa data-chave (base64) em vez de data-id
         notas_raw = page.evaluate("""() => {
-            const rows = document.querySelectorAll('table tbody tr[data-id]');
+            const rows = document.querySelectorAll('table tbody tr[data-chave]');
             return Array.from(rows).map(row => {
-                const dataId = row.getAttribute('data-id');
-                const competencia = row.querySelector('td:first-child')?.innerText?.trim() || '';
+                const chaveEncoded = row.getAttribute('data-chave');
+                const situacao = row.getAttribute('data-situacao') || '';
+                const valor = row.getAttribute('data-valor') || '';
 
-                // Busca link de visualização que contém a chave de acesso na URL
-                const linkVis = row.querySelector('a[href*="Visualizar"]');
-                const urlVis = linkVis ? linkVis.href : '';
+                // Captura data de geração da coluna td-data
+                const tdData = row.querySelector('.td-data');
+                const data = tdData ? tdData.innerText.trim() : '';
 
-                // Extrai chave de acesso da URL ex: /Index/42054072...
-                const match = urlVis.match(/\\/Index\\/([0-9]{40,60})/);
-                const chaveAcesso = match ? match[1] : null;
+                // Captura competência da coluna td-competencia
+                const tdComp = row.querySelector('.td-competencia');
+                const competencia = tdComp ? tdComp.innerText.trim() : '';
+
+                // Captura nome do tomador da coluna td-texto-grande
+                const tdTomador = row.querySelector('.td-texto-grande');
+                const tomador = tdTomador ? tdTomador.innerText.trim().substring(0, 60) : '';
+
+                // Busca chave numérica de 44+ dígitos no HTML da linha
+                // usada para montar a URL de download direta
+                const htmlRow = row.innerHTML;
+                const matchChave = htmlRow.match(/Download\/NFSe\/([0-9]{40,60})/);
+                const chaveNumerica = matchChave ? matchChave[1] : null;
+
+                // Busca link de download XML no menu de opções da linha
+                const links = Array.from(row.querySelectorAll('a'));
+                const linkDownload = links.find(a =>
+                    (a.href && a.href.includes('Download')) ||
+                    a.innerText.includes('XML') ||
+                    a.innerText.includes('Download')
+                );
+                const urlDownloadLink = linkDownload ? linkDownload.href : null;
 
                 return {
-                    data_id: dataId,
+                    data_chave: chaveEncoded,
+                    chave_acesso: chaveNumerica,
+                    situacao: situacao,
+                    valor: valor,
+                    data: data,
                     competencia: competencia,
-                    chave_acesso: chaveAcesso,
-                    url_download: chaveAcesso
-                        ? 'https://www.nfse.gov.br/EmissorNacional/Notas/Download/NFSe/' + chaveAcesso
-                        : null
+                    tomador: tomador,
+                    url_download: chaveNumerica
+                        ? 'https://www.nfse.gov.br/EmissorNacional/Notas/Download/NFSe/' + chaveNumerica
+                        : urlDownloadLink
                 };
-            }).filter(n => n.chave_acesso); // Remove notas sem chave de acesso
+            });
         }""")
 
         print(f"Notas encontradas: {len(notas_raw)}")
         for n in notas_raw:
-            print(f"  {n['competencia']} — ...{n['chave_acesso'][-10:]}")
+            print(f"  {n['data']} — {n['tomador']} — situacao: {n['situacao']} — chave: {n['data_chave'][-20:] if n['data_chave'] else 'N/A'}")
 
         return notas_raw
 
     except Exception as e:
-        # Salva screenshot do estado da página em caso de erro para debug
+        # Salva screenshot para debug em caso de erro
         page.screenshot(path="/tmp/erro_consulta.png")
         raise Exception(f"Erro na consulta: {str(e)}")
 
@@ -108,23 +116,48 @@ def consultar_notas(page, data_inicio: str, data_fim: str):
 def baixar_xml(page, nota: dict, download_dir: str):
     try:
         url = nota.get("url_download")
-        chave = nota.get("chave_acesso", "desconhecido")
-        print(f"Baixando nota ...{chave[-10:]}...")
+        chave = nota.get("chave_acesso") or nota.get("data_chave", "desconhecido")
+        nome_arquivo = nota.get("chave_acesso") or nota.get("data_chave", "nota")
+        print(f"Baixando nota ...{str(chave)[-10:]}...")
 
         if not url:
-            print("Sem URL de download")
+            # Se não tem URL direta tenta montar via data-chave encoded
+            data_chave = nota.get("data_chave")
+            if data_chave:
+                # Tenta acessar a página de opções e clicar no menu de download
+                print("Tentando download via menu de opções...")
+                try:
+                    # Busca o link de download pelo data-chave na tabela
+                    link = page.locator(
+                        f"tr[data-chave='{data_chave}'] a.icone-trigger"
+                    ).first
+                    link.click()
+                    page.wait_for_timeout(1000)
+
+                    # Clica em Download XML no menu que abriu
+                    btn_xml = page.locator(
+                        "a:has-text('Download XML'), a:has-text('XML')"
+                    ).first
+                    with page.expect_download(timeout=60000) as download_info:
+                        btn_xml.click()
+
+                    caminho = os.path.join(download_dir, f"{nome_arquivo}.xml")
+                    download_info.value.save_as(caminho)
+                    print(f"XML salvo via menu: {caminho}")
+                    page.keyboard.press("Escape")
+                    return True
+                except Exception as e:
+                    print(f"Falha via menu: {e}")
+                    return False
+            print("Sem URL de download disponível")
             return False
 
-        # Define o caminho local onde o XML será salvo temporariamente
-        # O nome do arquivo usa a chave de acesso completa para evitar duplicatas
-        caminho = os.path.join(download_dir, f"{chave}.xml")
-
-        # Usa expect_download para capturar o arquivo que o portal envia
-        # ao acessar a URL de download direto
+        # Download via URL direta — método principal
+        # A URL segue o padrão: /Notas/Download/NFSe/{chave_numerica_44_digitos}
+        caminho = os.path.join(download_dir, f"{nome_arquivo}.xml")
         with page.expect_download(timeout=60000) as download_info:
             page.goto(url)
 
-        # Salva o arquivo no diretório temporário
         download_info.value.save_as(caminho)
         print(f"XML salvo: {caminho}")
         return True
