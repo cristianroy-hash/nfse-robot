@@ -77,39 +77,45 @@ def consultar_notas(page, competencia: str):
         return []
 
 def baixar_xml(page, nota: dict, download_dir: str):
-    """
-    Esta função faz o 'balé' de clicar nos três pontos e depois no download.
-    """
     try:
-        print(f"Baixando XML da nota {nota['numero']}...")
+        print(f"Tentando baixar nota: {nota['numero']}")
         caminho_local = os.path.join(download_dir, f"{nota['numero']}.xml")
 
-        # 1. Garantir que a linha está visível
-        nota["linha"].scroll_into_view_if_needed()
+        # 1. Localiza a linha e rola até ela
+        linha = nota["linha"]
+        linha.scroll_into_view_if_needed()
         
-        # 2. Clicar no botão de Ações (os três pontos ou ícone de lista)
-        # Seletores comuns no portal nacional
-        btn_acoes = nota["linha"].locator("button i.fa-ellipsis-v, button.dropdown-toggle, [title*='Ações']").first
-        btn_acoes.click()
+        # 2. Localiza o botão de ações (tentando múltiplos seletores comuns)
+        # Adicionei o seletor .btn-sm e removi a dependência estrita do ícone
+        btn_acoes = linha.locator("button.dropdown-toggle, button[id*='btnAcoes'], .btn-sm, i.fa-ellipsis-v").first
+        
+        # Tenta clicar de forma humana, se falhar, força via JS
+        try:
+            btn_acoes.click(timeout=10000)
+        except:
+            print("Clique normal falhou, forçando clique via JS no botão de ações...")
+            page.evaluate("el => el.click()", btn_acoes.element_handle())
+
         page.wait_for_timeout(1500)
 
-        # 3. Clicar na opção Download XML que apareceu no menu suspenso
-        # Usamos o seletor de link que contenha o texto de download
-        btn_download = page.locator("a:has-text('Download XML'), [href*='Download/NFSe/']").first
+        # 3. Localiza o link de Download XML no menu que abriu
+        # Agora buscamos por qualquer link que tenha 'Download' ou 'XML' no texto
+        btn_download = page.locator("a:has-text('Download'), a:has-text('XML'), [href*='Download/NFSe']").first
         
-        with page.expect_download(timeout=30000) as download_info:
-            btn_download.click()
+        print(f"Iniciando captura do arquivo para nota {nota['numero']}...")
+        with page.expect_download(timeout=45000) as download_info:
+            # Força o clique no download também para evitar bloqueios de UI
+            page.evaluate("el => el.click()", btn_download.element_handle())
         
         download = download_info.value
         download.save_as(caminho_local)
         
-        # Fecha o menu (pressionando Esc) para não atrapalhar a próxima linha
+        # Fecha o menu para a próxima linha não encontrar o menu anterior aberto
         page.keyboard.press("Escape")
-        print(f"Download concluído: {nota['numero']}")
+        print(f"Sucesso! XML salvo em: {caminho_local}")
         return True
 
     except Exception as e:
-        print(f"Erro ao baixar nota {nota.get('numero')}: {str(e)}")
-        # Tenta fechar qualquer menu aberto para a próxima tentativa
-        page.keyboard.press("Escape")
+        print(f"Erro fatal no download da nota {nota.get('numero')}: {str(e)}")
+        page.keyboard.press("Escape") # Tenta limpar o estado da tela
         return False
