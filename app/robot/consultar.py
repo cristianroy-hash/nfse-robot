@@ -1,3 +1,5 @@
+print("🔥 consultar.py carregado")
+
 import os
 import asyncio
 from datetime import datetime
