@@ -8,88 +8,87 @@ def consultar_notas(page, competencia: str):
         ano, mes = int(ano_str), int(mes_str)
         ultimo_dia = monthrange(ano, mes)[1]
         
+        # O portal costuma preferir o formato sem barras ou com barras dependendo do script
+        # Vamos usar o formato DD/MM/YYYY que é o padrão visual
         data_inicio = f"01/{mes:02d}/{ano}"
         data_fim = f"{ultimo_dia:02d}/{mes:02d}/{ano}"
         
-        print(f"Tentando acessar painel para: {data_inicio} a {data_fim}")
+        print(f"Buscando notas de {data_inicio} até {data_fim}")
 
-        # 2. Forçar entrada no Emissor Nacional
-        # Às vezes o portal autentica mas não redireciona. Vamos forçar a URL de entrada.
-        page.goto("https://www.nfse.gov.br/EmissorNacional/", wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
-
-        # Se ainda estiver na tela de login, tentamos clicar no botão de certificado de novo
-        # (Isso aproveita o certificado que já está no 'context')
-        if "Login" in page.url:
-            print("Ainda na tela de login. Forçando clique no acesso por certificado...")
-            btn_cert = page.locator("text=Acesso com certificado digital").first
-            if btn_cert.is_visible():
-                btn_cert.click()
-                page.wait_for_timeout(5000)
-
-        # 3. Esperar o painel carregar (tentando múltiplos sinais de sucesso)
-        print("Aguardando confirmação de login (Sair ou Consultar)...")
-        try:
-            # Esperamos ou o botão Sair ou o link de consulta aparecerem
-            page.wait_for_selector("text=Sair, text=Emitir, text=Consultar", timeout=20000)
-        except:
-            print("Aviso: Timeout ao esperar 'Sair'. Tentando prosseguir mesmo assim...")
-
-        # 4. Ir direto para a URL de Notas Emitidas
-        # Isso costuma 'pular' menus que não carregam
-        print("Navegando direto para Notas Emitidas...")
-        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle")
+        # 2. Navegar para a URL de Notas Emitidas
+        # Forçamos o recarregamento para garantir que a sessão do certificado está ativa
+        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle", timeout=60000)
         
-        # 5. Preencher Filtros
-        print("Preenchendo campos de data...")
-        input_inicio = page.locator("input[name='DataInicio'], #DataInicio").first
-        input_fim = page.locator("input[name='DataFim'], #DataFim").first
+        # 3. Esperar o formulário de filtros
+        # Às vezes o ID do campo tem prefixos. Vamos usar seletores mais genéricos.
+        print("Aguardando formulário de filtros...")
         
-        input_inicio.wait_for(state="visible", timeout=15000)
+        # Tentamos múltiplos seletores para o campo de data
+        input_inicio = page.locator("input[id*='DataInicio'], input[name*='DataInicio'], .datepicker-input").first
         
-        # Simula digitação para ativar máscaras do portal
+        # Espera o elemento estar não só presente, mas visível e editável
+        input_inicio.wait_for(state="visible", timeout=30000)
+        
+        # 4. Preenchimento assistido (Clica, limpa e digita)
+        print("Preenchendo filtros...")
         input_inicio.click()
-        input_inicio.fill("")
-        input_inicio.type(data_inicio, delay=50)
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Backspace")
+        input_inicio.type(data_inicio, delay=100)
         
+        input_fim = page.locator("input[id*='DataFim'], input[name*='DataFim']").first
         input_fim.click()
-        input_fim.fill("")
-        input_fim.type(data_fim, delay=50)
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Backspace")
+        input_fim.type(data_fim, delay=100)
         
-        # 6. Filtrar
-        print("Clicando em Filtrar...")
-        page.locator("button:has-text('Filtrar'), button:has-text('Pesquisar')").first.click()
-        page.wait_for_timeout(4000)
+        # Tab para sair do campo e disparar eventos de validação do portal
+        page.keyboard.press("Tab")
+        page.wait_for_timeout(1000)
 
-        # 7. Coleta das Notas
+        # 5. Clicar no botão Filtrar
+        # O botão pode estar como 'Filtrar' ou apenas um ícone
+        botao_filtrar = page.locator("button:has-text('Filtrar'), .btn-primary:has-text('Filtrar'), button[type='submit']").first
+        botao_filtrar.click()
+        
+        # 6. Aguardar carregamento da tabela
+        print("Aguardando resultados...")
+        page.wait_for_timeout(5000)
+
         notas = []
+        # Espera a tabela de resultados ou a mensagem de "Nenhum registro"
+        # O seletor 'table tbody tr' é o mais comum
         linhas = page.locator("table tbody tr").all()
         
         for i, linha in enumerate(linhas):
             texto = linha.inner_text().strip()
             if not texto or "Nenhum registro" in texto:
-                continue
+                print("Nenhuma nota encontrada para este período.")
+                break
             
             colunas = linha.locator("td").all()
-            if colunas:
+            if len(colunas) > 1:
+                # Geralmente o número da nota está na coluna 0 ou 1
                 numero = colunas[0].inner_text().strip()
                 notas.append({"numero": numero, "linha": linha, "index": i})
 
-        print(f"Total de notas encontradas: {len(notas)}")
+        print(f"Sucesso: {len(notas)} notas encontradas.")
         return notas
 
     except Exception as e:
-        page.screenshot(path="/tmp/erro_final.png")
+        # Tira screenshot do estado atual da tela para vermos o que travou
+        page.screenshot(path="/tmp/erro_detalhado_consulta.png")
         raise Exception(f"Falha ao consultar notas: {str(e)}")
 
 def baixar_xml(page, nota: dict, download_dir: str):
-    # (Mantém a mesma lógica anterior de clicar em ações -> Download XML)
     try:
-        # Tenta clicar no botão de ações (geralmente tem um ícone de 'lista' ou 'três pontos')
+        # No portal nacional, as ações ficam num botão de 'três pontos' ou 'engrenagem'
+        # Vamos tentar clicar no último botão da linha (geralmente é o de ações)
         btn_acoes = nota["linha"].locator("button").last
         btn_acoes.click()
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(1500)
 
+        # Clica no texto "Download XML" que aparece no menu suspenso
         with page.expect_download(timeout=30000) as download_info:
             page.locator("text=Download XML").first.click()
         
