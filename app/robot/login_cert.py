@@ -3,44 +3,54 @@ import traceback
 def login_certificado(page):
     try:
         print("Acessando portal NFS-e...")
-        # Aumentamos o timeout para o portal processar o certificado na entrada
-        page.goto("https://www.nfse.gov.br/EmissorNacional/Login", wait_until="domcontentloaded", timeout=60000)
+        # Aumentamos o timeout global e aguardamos o carregamento inicial
+        page.goto("https://www.nfse.gov.br/EmissorNacional/Login", wait_until="domcontentloaded", timeout=90000)
         
-        # 1. Clica no botão de certificado (Sintaxe corrigida)
-        print("Clicando no botão de Certificado Digital...")
-        # Usamos seletores separados para evitar erro de parsing
-        botao_cert = page.locator("a.btn-login-certificado").first or \
-                     page.get_by_text("Certificado Digital").first or \
-                     page.locator("text=Certificado Digital").first
+        # 1. Busca exaustiva pelo botão de certificado
+        print("Localizando botão de acesso por certificado...")
         
-        botao_cert.click(timeout=15000)
+        # Tentamos por texto, que é o mais garantido visualmente
+        # Buscamos 'Certificado Digital' ou 'Entrar com Certificado'
+        botao_cert = page.get_by_text("Certificado Digital", exact=False).first
         
-        # 2. Aguarda o handshake mTLS
-        print("Aguardando processamento do certificado...")
+        # Se não estiver visível, tentamos por seletores de classe comuns do portal
+        if not botao_cert.is_visible():
+            botao_cert = page.locator("a.btn-login-certificado").first or \
+                         page.locator(".autenticacao button").first or \
+                         page.locator("a:has-text('Certificado')").first
+
+        # Aguarda o botão ficar pronto para clique
+        botao_cert.wait_for(state="visible", timeout=30000)
+        print("Botão encontrado. Clicando...")
+        botao_cert.click()
+        
+        # 2. Pequena pausa para o handshake mTLS (envio do PEM)
         page.wait_for_timeout(5000)
         
-        # 3. BYPASS: Força a entrada na área logada
-        # Como o certificado já foi enviado, o servidor deve reconhecer a sessão aqui
-        print("Forçando navegação para a home logada...")
+        # 3. BYPASS de Redirecionamento: Força a URL interna
+        # Se o certificado foi aceito, navegar para a home logada confirmará a sessão
+        print("Forçando entrada na área restrita...")
         page.goto("https://www.nfse.gov.br/EmissorNacional/", wait_until="networkidle", timeout=60000)
         
-        # 4. Verificação de sucesso
-        url_final = page.url
-        print(f"URL atual: {url_final}")
+        # 4. Verificação de Sucesso
+        url_atual = page.url
+        print(f"URL alcançada: {url_atual}")
         
-        # Se ainda estiver na tela de login, tenta ir direto para a consulta de notas
-        if "Login" in url_final:
-            print("Ainda detectado na tela de login. Tentando acesso direto à consulta...")
-            page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle")
+        # Se ainda estiver na URL de login, tentamos o pulo direto para emissão/consulta
+        if "Login" in url_atual:
+            print("Ainda na tela de login. Tentando salto direto para Notas Emitidas...")
+            page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="domcontentloaded")
             page.wait_for_timeout(3000)
 
-        # Se o botão "Sair" ou "Emitir" existir, estamos dentro!
-        if "Login" in page.url and not page.locator("text=Sair").is_visible():
-             raise Exception("O portal não autorizou o acesso. Verifique se o certificado é válido para o Portal Nacional.")
+        # O teste final é ver se o link de "Sair" ou o perfil do contribuinte aparece
+        if "Login" in page.url:
+             # Tira print para debug no Railway
+             page.screenshot(path="/tmp/falha_login_pos_clique.png")
+             raise Exception("O portal não autorizou o acesso após o envio do certificado PEM.")
              
         print("Login confirmado com sucesso!")
 
     except Exception as e:
-        page.screenshot(path="/tmp/erro_login_final.png")
-        print(f"Erro detalhado no login: {traceback.format_exc()}")
+        page.screenshot(path="/tmp/erro_login_fatal.png")
+        print(f"Detalhes do erro: {traceback.format_exc()}")
         raise Exception(f"Falha no login: {str(e)}")
