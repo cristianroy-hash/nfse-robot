@@ -121,46 +121,45 @@ def baixar_xml(page, nota: dict, download_dir: str):
         print(f"Baixando nota ...{str(chave)[-10:]}...")
 
         if not url:
-            # Se não tem URL direta tenta montar via data-chave encoded
-            data_chave = nota.get("data_chave")
-            if data_chave:
-                # Tenta acessar a página de opções e clicar no menu de download
-                print("Tentando download via menu de opções...")
-                try:
-                    # Busca o link de download pelo data-chave na tabela
-                    link = page.locator(
-                        f"tr[data-chave='{data_chave}'] a.icone-trigger"
-                    ).first
-                    link.click()
-                    page.wait_for_timeout(1000)
-
-                    # Clica em Download XML no menu que abriu
-                    btn_xml = page.locator(
-                        "a:has-text('Download XML'), a:has-text('XML')"
-                    ).first
-                    with page.expect_download(timeout=60000) as download_info:
-                        btn_xml.click()
-
-                    caminho = os.path.join(download_dir, f"{nome_arquivo}.xml")
-                    download_info.value.save_as(caminho)
-                    print(f"XML salvo via menu: {caminho}")
-                    page.keyboard.press("Escape")
-                    return True
-                except Exception as e:
-                    print(f"Falha via menu: {e}")
-                    return False
-            print("Sem URL de download disponível")
+            print("Sem URL de download")
             return False
 
-        # Download via URL direta — método principal
-        # A URL segue o padrão: /Notas/Download/NFSe/{chave_numerica_44_digitos}
         caminho = os.path.join(download_dir, f"{nome_arquivo}.xml")
-        with page.expect_download(timeout=60000) as download_info:
-            page.goto(url)
 
-        download_info.value.save_as(caminho)
+        # Usa expect_download com wait_for_event para capturar o download
+        # O portal retorna o arquivo como attachment — precisa esperar o evento
+        with page.expect_download(timeout=60000) as download_info:
+            # Abre em nova aba para não perder a sessão da página principal
+            page.evaluate(f"window.open('{url}', '_blank')")
+
+        download = download_info.value
+        download.save_as(caminho)
         print(f"XML salvo: {caminho}")
         return True
+
+    except Exception as e:
+        print(f"Erro ao baixar nota {str(chave)[-10:]}: {str(e)}")
+
+        # Fallback: tenta via fetch com cookies da sessão atual
+        try:
+            print("Tentando download via fetch...")
+            conteudo = page.evaluate(f"""async () => {{
+                const r = await fetch('{url}', {{
+                    credentials: 'include',
+                    headers: {{ 'Accept': 'application/xml, text/xml, */*' }}
+                }});
+                return await r.text();
+            }}""")
+
+            if conteudo and len(conteudo) > 100:
+                with open(caminho, 'w', encoding='utf-8') as f:
+                    f.write(conteudo)
+                print(f"XML salvo via fetch: {caminho}")
+                return True
+        except Exception as e2:
+            print(f"Fallback fetch falhou: {str(e2)}")
+
+        return False
 
     except Exception as e:
         print(f"Erro ao baixar nota {chave}: {str(e)}")
