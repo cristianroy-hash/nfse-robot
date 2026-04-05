@@ -26,23 +26,23 @@ def salvar_no_supabase(client_id: str, periodo: str, numero: str, caminho_local:
             file_options={"content-type": "application/xml", "upsert": "true"}
         )
 
-        print(f"📦 Salvo no Supabase: {caminho_storage}")
+        print(f"Salvo no Supabase: {caminho_storage}")
         return caminho_storage
 
     except Exception as e:
-        print(f"❌ Erro Supabase: {str(e)}")
+        print(f"Erro Supabase: {str(e)}")
         return None
 
 
 async def executar_importacao(job_id: str, payload: dict, jobs: dict):
-    tmp_dir = tempfile.mkdtemp()
-
     p = None
     browser = None
     context = None
     page = None
     cert_path = None
     key_path = None
+
+    tmp_dir = tempfile.mkdtemp()
 
     try:
         jobs[job_id]["status"] = "running"
@@ -53,7 +53,7 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
         periodo_str = f"{data_inicio}_{data_fim}"
 
         # =========================
-        # 🔐 CRIA BROWSER + CERTIFICADO
+        # BROWSER + CERTIFICADO
         # =========================
         print("🔐 Inicializando browser com certificado...")
 
@@ -65,20 +65,24 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
         print("🌐 Browser criado, iniciando consulta...")
 
         # =========================
-        # CONSULTA (SINCRONA)
+        # CONSULTA
         # =========================
-        notas = consultar_notas(page, data_inicio, data_fim)
+        notas = await consultar_notas(page, data_inicio, data_fim)
+
+        # 🔥 PROTEÇÃO (ESSENCIAL)
+        if not notas or not isinstance(notas, list):
+            raise Exception(f"❌ Consulta não retornou lista válida: {type(notas)}")
 
         jobs[job_id]["notas_encontradas"] = len(notas)
 
         xmls_baixados = 0
 
         # =========================
-        # DOWNLOAD + UPLOAD
+        # DOWNLOAD
         # =========================
         for nota in notas:
             try:
-                sucesso = baixar_xml(page, nota, tmp_dir)
+                sucesso = await baixar_xml(page, nota, tmp_dir)
 
                 if sucesso:
                     arquivos = [f for f in os.listdir(tmp_dir) if f.endswith(".xml")]
@@ -100,7 +104,7 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
                         jobs[job_id]["notas_importadas"] = xmls_baixados
 
             except Exception as e:
-                print(f"⚠️ Erro na nota: {str(e)}")
+                print(f"Erro na nota: {str(e)}")
                 continue
 
         jobs[job_id]["status"] = "completed"
@@ -111,25 +115,19 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
     except Exception as e:
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["message"] = str(e)
+
         print(f"❌ Job falhou: {traceback.format_exc()}")
 
     finally:
-        # =========================
-        # 🧹 LIMPEZA COMPLETA
-        # =========================
         try:
             if browser:
                 await browser.close()
-
             if p:
                 await p.stop()
-
             if cert_path and os.path.exists(cert_path):
                 os.remove(cert_path)
-
             if key_path and os.path.exists(key_path):
                 os.remove(key_path)
-
             if os.path.exists(tmp_dir):
                 shutil.rmtree(tmp_dir)
 
