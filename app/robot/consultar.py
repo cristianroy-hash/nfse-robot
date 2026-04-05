@@ -1,157 +1,137 @@
 import os
 import asyncio
 from datetime import datetime
+from playwright.async_api import async_playwright
 
 # =========================
-# CONSULTA DE NOTAS
+# LOGIN REAL NO PORTAL
+# =========================
+async def realizar_login(page):
+    print("🔐 Iniciando login no portal...")
+
+    await page.goto(
+        "https://www.nfse.gov.br/EmissorNacional",
+        wait_until="networkidle",
+        timeout=90000
+    )
+
+    await page.wait_for_timeout(5000)
+
+    print("URL inicial:", page.url)
+
+    # ⚠️ IMPORTANTE:
+    # Aqui você deve ajustar conforme o botão real do portal
+    # (texto pode variar um pouco)
+
+    try:
+        print("Clicando em login com certificado...")
+        await page.click("text=Certificado", timeout=15000)
+    except:
+        print("⚠️ Botão de certificado não encontrado (pode já estar logado)")
+
+    # Espera navegação pós-login
+    await page.wait_for_load_state("networkidle")
+    await page.wait_for_timeout(8000)
+
+    print("URL após tentativa de login:", page.url)
+
+    # =========================
+    # VALIDA LOGIN REAL
+    # =========================
+    if "login" in page.url.lower():
+        await page.screenshot(path="/tmp/erro_login.png")
+        raise Exception("❌ Login NÃO foi concluído (ainda está na tela de login)")
+
+    print("✅ Login confirmado")
+
+
+# =========================
+# CONSULTA
 # =========================
 async def consultar_notas(page, data_inicio: str, data_fim: str):
     try:
-        print(f"Iniciando consulta: {data_inicio} até {data_fim}")
+        print(f"📄 Consultando notas: {data_inicio} até {data_fim}")
 
-        # =========================
-        # FORMATAR DATAS
-        # =========================
         dt_ini = datetime.strptime(data_inicio, "%Y-%m-%d")
         dt_fim = datetime.strptime(data_fim, "%Y-%m-%d")
         data_ini_fmt = dt_ini.strftime("%d/%m/%Y")
         data_fim_fmt = dt_fim.strftime("%d/%m/%Y")
 
-        # =========================
-        # NAVEGAÇÃO ROBUSTA
-        # =========================
-        print("Acessando página de notas...")
+        # 🔥 IMPORTANTE: usar mesma sessão (não recriar page)
         await page.goto(
             "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
-            wait_until="networkidle",  # 🔥 mais confiável que domcontentloaded
+            wait_until="networkidle",
             timeout=90000
         )
 
-        # Espera extra (portal gov é lento mesmo)
         await page.wait_for_timeout(5000)
 
-        print("URL atual:", page.url)
+        print("URL consulta:", page.url)
 
-        # =========================
-        # VALIDA SE ESTÁ LOGADO
-        # =========================
         if "login" in page.url.lower():
-            await page.screenshot(path="/tmp/erro_login.png")
-            raise Exception("Sessão não autenticada (redirecionado para login)")
+            raise Exception("❌ Sessão perdida antes da consulta")
 
-        # =========================
-        # ESPERA CAMPO (COM DEBUG)
-        # =========================
-        try:
-            await page.wait_for_selector("#datainicio", timeout=60000)
-        except:
-            print("❌ Campo #datainicio NÃO encontrado")
+        # Espera campo
+        await page.wait_for_selector("#datainicio", timeout=60000)
 
-            html = await page.content()
-            print("Tem datainicio no HTML?", "#datainicio" in html)
-
-            await page.screenshot(path="/tmp/erro_sem_campo.png")
-
-            raise Exception("Campo de data não apareceu — possível erro de carregamento ou login")
-
-        # Pequena pausa para JS interno estabilizar
         await asyncio.sleep(2)
 
-        # =========================
-        # PREENCHIMENTO
-        # =========================
-        print("Preenchendo datas...")
-
+        # Preenche datas
         campo_ini = page.locator("#datainicio")
         await campo_ini.click()
         await page.keyboard.press("Control+A")
         await page.keyboard.press("Backspace")
         await page.keyboard.type(data_ini_fmt, delay=80)
-        await page.keyboard.press("Tab")
 
         campo_fim = page.locator("#datafim")
         await campo_fim.click()
         await page.keyboard.press("Control+A")
         await page.keyboard.press("Backspace")
         await page.keyboard.type(data_fim_fmt, delay=80)
-        await page.keyboard.press("Tab")
 
-        # Validação
-        val_ini = await campo_ini.input_value()
-        val_fim = await campo_fim.input_value()
-        print(f"Datas preenchidas: {val_ini} até {val_fim}")
+        print("🔎 Aplicando filtro...")
+        await page.locator("button:has-text('Filtrar')").click(force=True)
 
-        # =========================
-        # FILTRAR
-        # =========================
-        print("Clicando em Filtrar...")
-        await page.locator("button:has-text('Filtrar')").first.click(force=True)
-
-        # Espera carregar resultados
         await page.wait_for_timeout(8000)
 
-        # =========================
-        # EXTRAÇÃO
-        # =========================
-        print("Extraindo notas...")
-
-        notas_raw = await page.evaluate("""() => {
+        notas = await page.evaluate("""() => {
             const rows = document.querySelectorAll('table tbody tr[data-chave]');
             return Array.from(rows).map(row => {
-                const chaveEncoded = row.getAttribute('data-chave');
                 const htmlRow = row.innerHTML;
-
-                const matchChave = htmlRow.match(/Download\\/NFSe\\/([0-9]{40,60})/);
-                const chaveNumerica = matchChave ? matchChave[1] : null;
+                const match = htmlRow.match(/Download\\/NFSe\\/([0-9]{40,60})/);
+                const chave = match ? match[1] : null;
 
                 return {
-                    data_chave: chaveEncoded,
-                    chave_acesso: chaveNumerica,
-                    situacao: row.getAttribute('data-situacao') || '',
-                    valor: row.getAttribute('data-valor') || '',
-                    data: row.querySelector('.td-data')?.innerText.trim() || '',
-                    competencia: row.querySelector('.td-competencia')?.innerText.trim() || '',
-                    tomador: row.querySelector('.td-texto-grande')?.innerText.trim().substring(0, 60) || '',
-                    url_download: chaveNumerica
-                        ? 'https://www.nfse.gov.br/EmissorNacional/Notas/Download/NFSe/' + chaveNumerica
+                    chave_acesso: chave,
+                    url_download: chave
+                        ? 'https://www.nfse.gov.br/EmissorNacional/Notas/Download/NFSe/' + chave
                         : null
                 };
             });
         }""")
 
-        print(f"✅ {len(notas_raw)} notas encontradas")
-
-        if len(notas_raw) == 0:
-            await page.screenshot(path="/tmp/sem_notas.png")
-            print("⚠️ Nenhuma nota encontrada — verificar filtro ou sessão")
-
-        return notas_raw
+        print(f"✅ {len(notas)} notas encontradas")
+        return notas
 
     except Exception as e:
-        print(f"❌ ERRO na consulta: {str(e)}")
-        await page.screenshot(path="/tmp/erro_geral_consulta.png")
+        print("❌ Erro na consulta:", str(e))
+        await page.screenshot(path="/tmp/erro_consulta.png")
         raise
 
 
 # =========================
-# DOWNLOAD XML
+# DOWNLOAD
 # =========================
-async def baixar_xml(page, nota: dict, download_dir: str):
+async def baixar_xml(page, nota, download_dir):
     try:
         url = nota.get("url_download")
-        chave = nota.get("chave_acesso") or nota.get("data_chave", "nota")
+        chave = nota.get("chave_acesso")
 
         if not url:
-            print("Nota sem URL")
             return False
 
         caminho = os.path.join(download_dir, f"{chave}.xml")
 
-        print(f"⬇️ Baixando {str(chave)[-10:]}")
-
-        # =========================
-        # MÉTODO 1: DOWNLOAD NATIVO
-        # =========================
         try:
             async with page.expect_download(timeout=40000) as download_info:
                 await page.evaluate(f"window.open('{url}', '_blank')")
@@ -159,38 +139,71 @@ async def baixar_xml(page, nota: dict, download_dir: str):
             download = await download_info.value
             await download.save_as(caminho)
 
-            print("✅ Download via navegador OK")
+            print(f"✅ XML salvo: {chave}")
             return True
 
-        except Exception as e:
-            print("⚠️ Falha no download direto:", str(e))
-
-        # =========================
-        # MÉTODO 2: FETCH (fallback)
-        # =========================
-        try:
-            print("Tentando via fetch...")
-
+        except:
+            # fallback fetch
             conteudo = await page.evaluate(f"""async () => {{
-                const r = await fetch('{url}', {{
-                    credentials: 'include',
-                    headers: {{ 'Accept': 'application/xml, text/xml, */*' }}
-                }});
+                const r = await fetch('{url}', {{ credentials: 'include' }});
                 return await r.text();
             }}""")
 
-            if conteudo and "<?xml" in conteudo:
-                with open(caminho, 'w', encoding='utf-8') as f:
+            if "<?xml" in conteudo:
+                with open(caminho, "w", encoding="utf-8") as f:
                     f.write(conteudo)
-
-                print("✅ Download via fetch OK")
+                print(f"✅ XML via fetch: {chave}")
                 return True
-
-        except Exception as e:
-            print("❌ Fetch falhou:", str(e))
 
         return False
 
     except Exception as e:
-        print(f"❌ Erro geral ao baixar XML: {str(e)}")
+        print("Erro download:", str(e))
         return False
+
+
+# =========================
+# FLUXO PRINCIPAL (IMPORTANTE)
+# =========================
+async def executar_fluxo(data_inicio, data_fim):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,  # Railway precisa ser True
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+
+        # 🔥 CONTEXTO ÚNICO (ESSENCIAL)
+        context = await browser.new_context()
+
+        # 🔥 PAGE ÚNICA (ESSENCIAL)
+        page = await context.new_page()
+
+        try:
+            # LOGIN
+            await realizar_login(page)
+
+            # VALIDA COOKIE (debug forte)
+            cookies = await context.cookies()
+            print("🍪 Cookies ativos:", len(cookies))
+
+            # CONSULTA
+            notas = await consultar_notas(page, data_inicio, data_fim)
+
+            # DOWNLOAD
+            download_dir = "/tmp/xmls"
+            os.makedirs(download_dir, exist_ok=True)
+
+            for nota in notas[:15]:
+                await baixar_xml(page, nota, download_dir)
+
+            print("🚀 Processo finalizado com sucesso")
+
+        finally:
+            await browser.close()
+
+
+# =========================
+# EXECUÇÃO LOCAL (TESTE)
+# =========================
+if __name__ == "__main__":
+    asyncio.run(executar_fluxo("2026-03-01", "2026-03-31"))
