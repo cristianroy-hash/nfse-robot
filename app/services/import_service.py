@@ -56,7 +56,7 @@ def executar_importacao(job_id: str, payload: dict, jobs: dict):
         # Chamada ao robô atualizada para aceitar o período ou data inicial
         # Se o seu consultar_notas espera apenas uma string, passamos data_inicio
         # Se ele já foi atualizado para dois parâmetros, ajuste aqui:
-        notas = consultar_notas(page, data_inicio, data_fim) 
+        notas = await consultar_notas(page, data_inicio, data_fim) 
         
         jobs[job_id]["notas_encontradas"] = len(notas)
 
@@ -64,7 +64,7 @@ def executar_importacao(job_id: str, payload: dict, jobs: dict):
         for nota in notas:
             try:
                 # O baixar_xml salvará o arquivo no diretório temporário
-                sucesso = baixar_xml(page, nota, tmp_dir)
+                sucesso = await baixar_xml(page, nota, tmp_dir)
                 
                 if sucesso:
                     # O robô agora salva com o ID da nota como nome do arquivo
