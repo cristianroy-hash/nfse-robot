@@ -13,7 +13,9 @@ def consultar_notas(page, data_inicio: str, data_fim: str):
         )
         page.wait_for_timeout(3000)
 
-        print(f"URL atual: {page.url}")
+       print(f"URL atual: {page.url}")
+       texto = page.evaluate("() => document.body.innerText.substring(0, 500)")
+       print(f"Texto da página: {texto}")
 
         # Preenche filtro de data via JavaScript
         preencheu = page.evaluate(f"""() => {{
