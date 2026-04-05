@@ -53,7 +53,7 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
         )
 
         # Realiza login (Se for async no seu robot, use await)
-        login_certificado(page)
+        await login_certificado(page)
         
         # Consulta notas (Async)
         notas = await consultar_notas(page, data_inicio, data_fim) 
@@ -106,7 +106,7 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
                 # No Playwright async, o close também deve ser await
                 await browser.close()
             if p:
-                p.stop()
+                await p.stop()
             if cert_path and os.path.exists(cert_path):
                 os.remove(cert_path)
             if key_path and os.path.exists(key_path):
