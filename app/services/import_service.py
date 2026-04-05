@@ -3,6 +3,7 @@ import tempfile
 import traceback
 import shutil
 
+from app.robot.browser import criar_browser_com_certificado
 from app.robot.consultar import consultar_notas, baixar_xml
 from supabase import create_client
 
@@ -25,16 +26,23 @@ def salvar_no_supabase(client_id: str, periodo: str, numero: str, caminho_local:
             file_options={"content-type": "application/xml", "upsert": "true"}
         )
 
-        print(f"Salvo no Supabase: {caminho_storage}")
+        print(f"📦 Salvo no Supabase: {caminho_storage}")
         return caminho_storage
 
     except Exception as e:
-        print(f"Erro Supabase: {str(e)}")
+        print(f"❌ Erro Supabase: {str(e)}")
         return None
 
 
 async def executar_importacao(job_id: str, payload: dict, jobs: dict):
     tmp_dir = tempfile.mkdtemp()
+
+    p = None
+    browser = None
+    context = None
+    page = None
+    cert_path = None
+    key_path = None
 
     try:
         jobs[job_id]["status"] = "running"
@@ -44,20 +52,20 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
         data_fim = payload.get("data_fim")
         periodo_str = f"{data_inicio}_{data_fim}"
 
-        # 🔥 AQUI É A CHAVE:
-        # 👉 NÃO cria browser
-        # 👉 NÃO faz login
-        # 👉 RECEBE page já autenticada
+        # =========================
+        # 🔐 CRIA BROWSER + CERTIFICADO
+        # =========================
+        print("🔐 Inicializando browser com certificado...")
 
-        page = payload.get("page")
+        p, browser, context, page, cert_path, key_path = await criar_browser_com_certificado(
+            payload["certificado_base64"],
+            payload["certificado_senha"]
+        )
 
-        if not page:
-            raise Exception("❌ Page não foi fornecida (sessão não existe)")
-
-        print("✅ Usando sessão existente")
+        print("🌐 Browser criado, iniciando consulta...")
 
         # =========================
-        # CONSULTA
+        # CONSULTA (SINCRONA)
         # =========================
         notas = consultar_notas(page, data_inicio, data_fim)
 
@@ -65,6 +73,9 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
 
         xmls_baixados = 0
 
+        # =========================
+        # DOWNLOAD + UPLOAD
+        # =========================
         for nota in notas:
             try:
                 sucesso = baixar_xml(page, nota, tmp_dir)
@@ -89,7 +100,7 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
                         jobs[job_id]["notas_importadas"] = xmls_baixados
 
             except Exception as e:
-                print(f"Erro na nota: {str(e)}")
+                print(f"⚠️ Erro na nota: {str(e)}")
                 continue
 
         jobs[job_id]["status"] = "completed"
@@ -103,8 +114,26 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
         print(f"❌ Job falhou: {traceback.format_exc()}")
 
     finally:
+        # =========================
+        # 🧹 LIMPEZA COMPLETA
+        # =========================
         try:
+            if browser:
+                await browser.close()
+
+            if p:
+                await p.stop()
+
+            if cert_path and os.path.exists(cert_path):
+                os.remove(cert_path)
+
+            if key_path and os.path.exists(key_path):
+                os.remove(key_path)
+
             if os.path.exists(tmp_dir):
                 shutil.rmtree(tmp_dir)
+
+            print("🧹 Limpeza final concluída")
+
         except Exception as e:
             print(f"Erro limpeza: {str(e)}")
