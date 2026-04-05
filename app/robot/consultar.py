@@ -3,113 +3,84 @@ import traceback
 from calendar import monthrange
 
 def consultar_notas(page, competencia: str):
-    """
-    Função principal de navegação e consulta de notas.
-    Utiliza exploração dinâmica de links para encontrar o caminho correto.
-    """
     try:
         # 1. Preparação das Datas
-        # Formato esperado da competência: "YYYY-MM"
         ano_str, mes_str = competencia.split("-")
         ano, mes = int(ano_str), int(mes_str)
         ultimo_dia = monthrange(ano, mes)[1]
         
-        # Datas sem barras (geralmente melhor para campos com máscara)
+        # Formato DDMMAAAA para preenchimento de campos com máscara
         data_ini = f"01{mes:02d}{ano}"
         data_fim = f"{ultimo_dia:02d}{mes:02d}{ano}"
         
-        print(f"--- INICIANDO EXPLORAÇÃO DE CONSULTA ---")
-        print(f"Período Alvo: {data_ini} até {data_fim}")
+        print(f"--- INICIANDO CONSULTA DIRETA ---")
+        print(f"Período: {data_ini} a {data_fim}")
 
-        # 2. Mapeamento Dinâmico do Dashboard (Sua Estratégia)
-        # Captura todos os links para não dependermos de seletores fixos que mudam
-        links_pagina = page.evaluate("""() => {
-            return Array.from(document.querySelectorAll('a'))
-                .map(a => ({ 
-                    text: a.innerText.trim(), 
-                    href: a.href 
-                }))
-                .filter(a => a.text && a.href.includes('http'));
-        }""")
-        
-        print("Links detectados no Dashboard para análise:")
-        url_notas = None
-        for l in links_pagina:
-            texto_link = l["text"].lower()
-            href_link = l["href"].lower()
-            print(f"  > [{l['text']}] -> {l['href']}")
-            
-            # Lógica de busca: Priorizamos links que falem em "Emitidas" ou "Consultar"
-            if "emitida" in texto_link or "emitidas" in href_link:
-                url_notas = l["href"]
-                print(f"  *** URL de Notas Emitidas Identificada: {url_notas} ***")
-                break # Encontramos o alvo principal
-
-        # 3. Navegação para a área de Notas
-        if url_notas:
-            print(f"Navegando para a URL identificada...")
-            page.goto(url_notas, wait_until="networkidle", timeout=60000)
-        else:
-            print("Link específico não encontrado nos menus. Tentando URL padrão de contingência...")
-            page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas")
-
+        # 2. SALTO DIRETO PARA A PÁGINA DE NOTAS
+        # Evitamos clicar no menu 'Consultar' que está dando timeout
+        print("Navegando diretamente para a URL de notas emitidas...")
+        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle", timeout=60000)
         page.wait_for_timeout(3000)
-        
-        # 4. Diagnóstico Pós-Navegação
-        url_atual = page.url
-        texto_tela = page.evaluate("() => document.body.innerText.substring(0, 1000)")
-        print(f"URL Atual: {url_atual}")
-        print(f"Texto inicial da página: {texto_tela[:200]}...")
 
-        # 5. Preenchimento do Formulário de Filtros
-        print("Localizando campos de data...")
-        # Seletores flexíveis: classe .data, .form-control ou pelo placeholder de data
+        # 3. DIAGNÓSTICO DA TELA DE FILTRO
+        url_atual = page.url
+        print(f"URL alcançada: {url_atual}")
+        
+        # 4. LOCALIZAR CAMPOS DE DATA
+        # Usamos seletores variados para garantir que pegamos os inputs de data
+        print("Aguardando campos de data...")
         selector_data = "input.data, .form-control.data, input[placeholder*='/'], input[name*='Data']"
         
         try:
-            page.wait_for_selector(selector_data, timeout=20000)
+            page.wait_for_selector(selector_data, state="visible", timeout=30000)
             inputs = page.locator(selector_data).all()
             
             if len(inputs) >= 2:
-                print(f"Preenchendo período: {data_ini} a {data_fim}")
-                # Preenche Data Início e Data Fim
+                print(f"Campos encontrados: {len(inputs)}. Preenchendo datas...")
+                # Preenche Início e Fim
                 for i, campo in enumerate([inputs[0], inputs[1]]):
                     valor = data_ini if i == 0 else data_fim
                     campo.click()
                     page.keyboard.press("Control+A")
                     page.keyboard.press("Backspace")
-                    page.keyboard.type(valor, delay=60)
+                    page.keyboard.type(valor, delay=70)
                     page.keyboard.press("Tab")
                     page.wait_for_timeout(500)
 
-                # 6. Acionar Filtro
+                # 5. CLICAR EM FILTRAR
                 print("Clicando no botão Filtrar...")
-                btn_filtrar = page.locator("button:has-text('Filtrar'), .btn-primary, #btnFiltrar").first
+                # Tentamos por ID ou por texto
+                btn_filtrar = page.locator("#btnFiltrar, button:has-text('Filtrar'), .btn-primary").first
                 btn_filtrar.click()
                 
-                # Aguarda o carregamento dos resultados
+                # Aguarda a tabela atualizar
+                print("Aguardando processamento do filtro...")
                 page.wait_for_timeout(5000)
-                print("Filtro aplicado. Analisando resultados...")
             else:
-                print(f"Aviso: Encontrados apenas {len(inputs)} campos de data. Verifique a estrutura.")
-        
-        except Exception as e_form:
-            print(f"Erro ao interagir com o formulário: {str(e_form)}")
+                print(f"ERRO: Apenas {len(inputs)} campos de data encontrados.")
+                page.screenshot(path="/tmp/campos_nao_encontrados.png")
 
-        # 7. Coleta de Notas (Baseado na estrutura de tabela padrão)
+        except Exception as e_campos:
+            print(f"Não foi possível interagir com os campos de data: {str(e_campos)}")
+            page.screenshot(path="/tmp/erro_interacao_campos.png")
+
+        # 6. COLETAR RESULTADOS DA TABELA
         notas_encontradas = []
+        # Localiza as linhas da tabela de resultados
         linhas = page.locator("table tbody tr").all()
         
         for linha in linhas:
             texto_linha = linha.inner_text().strip()
-            if "Nenhum registro" in texto_linha or not texto_linha:
+            # Ignora linhas vazias ou mensagens de "nenhum registro"
+            if "Nenhum registro" in texto_linha or not texto_linha or len(texto_linha) < 10:
                 continue
             
             colunas = linha.locator("td").all()
             if len(colunas) > 0:
+                # O número da nota costuma ser a primeira coluna
                 num_nota = colunas[0].inner_text().split('\n')[0].strip()
                 
-                # Tenta capturar link de download direto se ele estiver visível na linha
+                # Tenta capturar o link de download se ele estiver na linha (seu atalho)
                 url_direta = linha.locator("a[href*='Download/NFSe/']").get_attribute("href")
                 full_url = None
                 if url_direta:
@@ -121,59 +92,51 @@ def consultar_notas(page, competencia: str):
                     "url_download": full_url
                 })
 
-        print(f"Fim do processo. Notas detectadas: {len(notas_encontradas)}")
+        print(f"Consulta finalizada. Notas detectadas para processamento: {len(notas_encontradas)}")
         return notas_encontradas
 
     except Exception as e:
-        page.screenshot(path="/tmp/erro_consultar_completo.png")
-        print(f"DETALHES DO ERRO: {traceback.format_exc()}")
-        raise Exception(f"Falha crítica na consulta: {str(e)}")
+        page.screenshot(path="/tmp/erro_critico_consulta.png")
+        print(f"Falha detalhada: {traceback.format_exc()}")
+        raise Exception(f"Erro na consulta: {str(e)}")
 
 def baixar_xml(page, nota: dict, download_dir: str):
     """
-    Lógica de download para cada nota individual.
-    Tenta URL direta e possui fallback para o menu de ações (três pontos).
+    Realiza o download do arquivo XML da nota.
     """
     try:
-        print(f"Iniciando download da nota: {nota['numero']}")
+        print(f"Baixando XML da nota {nota['numero']}...")
+        caminho_final = os.path.join(download_dir, f"{nota['numero']}.xml")
 
-        # Caminho final do arquivo
-        caminho_arquivo = os.path.join(download_dir, f"{nota['numero']}.xml")
-
-        # Estratégia 1: URL Direta
+        # Prioridade 1: Link direto (se capturado na tabela)
         if nota.get("url_download"):
             try:
-                print(f"Tentando download via link direto...")
                 with page.expect_download(timeout=20000) as download_info:
                     page.goto(nota["url_download"])
                 download = download_info.value
-                download.save_as(caminho_arquivo)
-                print(f"Sucesso via link direto: {nota['numero']}")
+                download.save_as(caminho_final)
                 return True
-            except Exception as e_url:
-                print(f"Link direto falhou, tentando via menu... ({str(e_url)})")
+            except:
+                print("Link direto falhou, tentando via menu de ações...")
 
-        # Estratégia 2: Menu de Ações (Três Pontos)
-        # Localiza o botão que abre o dropdown na linha específica da nota
+        # Prioridade 2: Menu de Três Pontos (Clique manual)
+        # 1. Clica no botão de ações (três pontos) na linha da nota
         btn_acoes = nota["linha"].locator("button i.fa-ellipsis-v, button.dropdown-toggle, [title*='Ações']").first
         btn_acoes.click()
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(1500)
 
-        # Busca o link de download que apareceu no menu suspenso
+        # 2. Clica na opção de Download XML
         link_download = page.locator("a:has-text('Download XML'), [href*='Download/NFSe/']").first
-        
         with page.expect_download(timeout=45000) as download_info:
             link_download.click()
 
         download = download_info.value
-        download.save_as(caminho_arquivo)
+        download.save_as(caminho_final)
         
-        # Fecha o menu para não atrapalhar a próxima linha
+        # Fecha o menu para a próxima nota
         page.keyboard.press("Escape")
-        
-        print(f"Sucesso via menu de ações: {nota['numero']}")
         return True
 
     except Exception as e:
-        print(f"Falha ao baixar nota {nota['numero']}: {str(e)}")
+        print(f"Falha no download da nota {nota['numero']}: {str(e)}")
         return False
