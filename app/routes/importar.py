@@ -5,12 +5,15 @@ import uuid
 import threading
 
 router = APIRouter()
+# Dicionário global para armazenar o status dos jobs (em produção, o ideal é Redis ou BD)
 jobs = {}
 
 class ImportRequest(BaseModel):
     cliente_id: str
     cnpj: str
-    competencia: str
+    # Substituído competencia por data_inicio e data_fim para alinhar com o HTML
+    data_inicio: str
+    data_fim: str
     certificado_base64: Optional[str] = None
     certificado_senha: Optional[str] = None
     portal_usuario: Optional[str] = None
@@ -18,18 +21,24 @@ class ImportRequest(BaseModel):
 
 @router.post("/importar-notas")
 def importar_notas(req: ImportRequest):
+    # Importação local para evitar importação circular
     from app.services.import_service import executar_importacao
     
     job_id = str(uuid.uuid4())
+    
+    # Inicializa o status do job no dicionário
     jobs[job_id] = {
         "job_id": job_id,
         "status": "queued",
         "cliente_id": req.cliente_id,
-        "competencia": req.competencia,
+        "data_inicio": req.data_inicio,
+        "data_fim": req.data_fim,
         "notas_importadas": 0,
-        "message": ""
+        "message": "Na fila de processamento"
     }
 
+    # Dispara a thread do robô
+    # req.dict() enviará todos os campos (incluindo as novas datas) para o serviço
     thread = threading.Thread(
         target=executar_importacao,
         args=(job_id, req.dict(), jobs)
