@@ -5,20 +5,26 @@ def consultar_notas(page, data_inicio: str, data_fim: str):
     try:
         print(f"--- INICIANDO CAPTURA VIA PERÍODO ---")
         
-        # 1. Força a ida para a URL de Notas Emitidas
-        # Adicionei um wait_until="load" para garantir que o menu carregou
-        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="load", timeout=60000)
-        
-        # 2. Pequena pausa para o JavaScript do portal "assentar"
-        page.wait_for_timeout(5000)
+        # 1. Em vez de ir direto pela URL, vamos pelo menu se possível
+        # Se não, garantimos que estamos no Dashboard antes de ir para Emitidas
+        if "Dashboard" not in page.url:
+            page.goto("https://www.nfse.gov.br/EmissorNacional/Dashboard")
+            page.wait_for_timeout(2000)
 
-        # 3. Se ainda não encontrar o seletor, tenta recarregar a URL uma vez
+        # 2. Tenta ir para a página de consulta
+        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas")
+        
+        # 3. Espera agressiva pelo seletor (aumentamos o timeout e verificamos se houve erro de permissão)
         try:
-            page.wait_for_selector("input[name*='DataEmissaoInicio']", timeout=10000)
-        except:
-            print("-> Campo não apareceu. Tentando recarregar a página de consulta...")
-            page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle")
             page.wait_for_selector("input[name*='DataEmissaoInicio']", timeout=20000)
+        except:
+            html_atual = page.content()
+            if "Contribuinte" in html_atual:
+                 print("-> ERRO: O portal ainda pede para selecionar o Perfil!")
+                 page.click("text=Contribuinte")
+                 page.wait_for_timeout(5000)
+                 page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas")
+                 page.wait_for_selector("input[name*='DataEmissaoInicio']", timeout=20000)
 
         # Converte as datas de AAAA-MM-DD (HTML) para DD/MM/AAAA (Portal) se necessário
         if '-' in data_inicio:
