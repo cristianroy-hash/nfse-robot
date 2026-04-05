@@ -2,9 +2,9 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional
 import uuid
+import threading
 
 router = APIRouter()
-
 jobs = {}
 
 class ImportRequest(BaseModel):
@@ -18,6 +18,8 @@ class ImportRequest(BaseModel):
 
 @router.post("/importar-notas")
 def importar_notas(req: ImportRequest):
+    from app.services.import_service import executar_importacao
+    
     job_id = str(uuid.uuid4())
     jobs[job_id] = {
         "job_id": job_id,
@@ -27,6 +29,13 @@ def importar_notas(req: ImportRequest):
         "notas_importadas": 0,
         "message": ""
     }
+
+    thread = threading.Thread(
+        target=executar_importacao,
+        args=(job_id, req.dict(), jobs)
+    )
+    thread.start()
+
     return jobs[job_id]
 
 @router.get("/status/{job_id}")
