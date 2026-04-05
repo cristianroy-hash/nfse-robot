@@ -5,33 +5,30 @@ def consultar_notas(page, data_inicio: str, data_fim: str):
     try:
         print(f"--- INICIANDO CAPTURA VIA PERÍODO ---")
         
-        # 1. Em vez de ir direto pela URL, vamos interagir com o menu
-        # Isso garante que os scripts da página sejam carregados na ordem certa
-        print("-> Acessando menu de consulta...")
+        # Caminho 1: Tenta ir direto
+        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="load")
         
-        # Tenta clicar no menu 'Notas Fiscais' e depois 'Emitidas'
-        # Se os seletores mudarem, o goto ainda está aqui como fallback, mas com mais espera
-        try:
-            # Tenta clicar no ícone de lupa ou menu de consulta se estiver visível
-            if page.locator("a:has-text('Consultar')").is_visible():
-                page.click("a:has-text('Consultar')")
-            else:
-                page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle")
-        except:
-            page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas")
+        # ESPERA ATIVA: Em vez de wait_for_selector direto, vamos tentar um loop de 3 tentativas
+        campo_visivel = False
+        for i in range(3):
+            try:
+                print(f"Tentativa {i+1} de localizar campos de data...")
+                page.wait_for_selector("input[name*='DataEmissao']", timeout=7000)
+                campo_visivel = True
+                break
+            except:
+                # Caminho 2: Se não carregou, tenta clicar no menu 'Consultar' que costuma estar no topo
+                print("Campo não visível. Tentando clicar no menu Consultar...")
+                page.locator("a:has-text('Consultar')").first.click(force=True)
+                page.wait_for_timeout(3000)
 
-        # 2. ESPERA CRUCIAL: Aguarda o formulário de filtros carregar
-        # Aumentamos para 30s pois o portal do governo oscila muito
-        page.wait_for_selector("input[name*='DataEmissaoInicio']", timeout=30000)
-        print("-> Campos de consulta localizados.")
+        if not campo_visivel:
+            # Caminho 3: Fallback final via JS
+            print("Forçando navegação via JavaScript...")
+            page.evaluate("window.location.href='/EmissorNacional/NFSes/Emitidas'")
+            page.wait_for_selector("input[name*='DataEmissaoInicio']", timeout=15000)
 
-        # 3. Conversão de data (HTML AAAA-MM-DD para Portal DD/MM/AAAA)
-        if '-' in data_inicio:
-            ano_i, mes_i, dia_i = data_inicio.split('-')
-            data_inicio = f"{dia_i}/{mes_i}/{ano_i}"
-        if '-' in data_fim:
-            ano_f, mes_f, dia_f = data_fim.split('-')
-            data_fim = f"{dia_f}/{mes_f}/{ano_f}"
+        # ... restante do código de preenchimento (use o page.type com delay que mandei antes)
 
         # 4. Preenchimento "Lento" (Simulando humano para o site não travar)
         page.locator("input[name*='DataEmissaoInicio']").click()
