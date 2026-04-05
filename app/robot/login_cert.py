@@ -3,54 +3,68 @@ import traceback
 def login_certificado(page):
     try:
         print("Acessando portal NFS-e...")
-        # Aumentamos o timeout global e aguardamos o carregamento inicial
-        page.goto("https://www.nfse.gov.br/EmissorNacional/Login", wait_until="domcontentloaded", timeout=90000)
-        
-        # 1. Busca exaustiva pelo botão de certificado
-        print("Localizando botão de acesso por certificado...")
-        
-        # Tentamos por texto, que é o mais garantido visualmente
-        # Buscamos 'Certificado Digital' ou 'Entrar com Certificado'
-        botao_cert = page.get_by_text("Certificado Digital", exact=False).first
-        
-        # Se não estiver visível, tentamos por seletores de classe comuns do portal
-        if not botao_cert.is_visible():
-            botao_cert = page.locator("a.btn-login-certificado").first or \
-                         page.locator(".autenticacao button").first or \
-                         page.locator("a:has-text('Certificado')").first
+        page.goto(
+            "https://www.nfse.gov.br/EmissorNacional/Login",
+            wait_until="domcontentloaded",
+            timeout=90000
+        )
+        page.wait_for_timeout(3000)
 
-        # Aguarda o botão ficar pronto para clique
-        botao_cert.wait_for(state="visible", timeout=30000)
-        print("Botão encontrado. Clicando...")
-        botao_cert.click()
+        # Captura o href exato do botão de certificado
+        href = page.evaluate("""() => {
+            const links = Array.from(document.querySelectorAll('a'));
+            const cert = links.find(l => l.innerText.toLowerCase().includes('certificado'));
+            return cert ? { href: cert.href, text: cert.innerText.trim() } : null;
+        }""")
+        print(f"Link certificado capturado: {href}")
+
+        # Clica no botão
+        print("Clicando no botão 'Certificado Digital'...")
+        botao = page.get_by_text("Certificado Digital", exact=False).first
+        botao.wait_for(state="visible", timeout=30000)
+        botao.click()
         
-        # 2. Pequena pausa para o handshake mTLS (envio do PEM)
+        # Aguarda o handshake mTLS (importante para o PEM ser enviado)
         page.wait_for_timeout(5000)
-        
-        # 3. BYPASS de Redirecionamento: Força a URL interna
-        # Se o certificado foi aceito, navegar para a home logada confirmará a sessão
-        print("Forçando entrada na área restrita...")
-        page.goto("https://www.nfse.gov.br/EmissorNacional/", wait_until="networkidle", timeout=60000)
-        
-        # 4. Verificação de Sucesso
-        url_atual = page.url
-        print(f"URL alcançada: {url_atual}")
-        
-        # Se ainda estiver na URL de login, tentamos o pulo direto para emissão/consulta
-        if "Login" in url_atual:
-            print("Ainda na tela de login. Tentando salto direto para Notas Emitidas...")
-            page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
+        print(f"URL após clique: {page.url}")
 
-        # O teste final é ver se o link de "Sair" ou o perfil do contribuinte aparece
-        if "Login" in page.url:
-             # Tira print para debug no Railway
-             page.screenshot(path="/tmp/falha_login_pos_clique.png")
-             raise Exception("O portal não autorizou o acesso após o envio do certificado PEM.")
-             
-        print("Login confirmado com sucesso!")
+        # Se ainda estiver no login, navega direto pelo href capturado
+        if "Login" in page.url and href and href.get("href"):
+            print(f"Tentando navegar direto para o endpoint de autenticação: {href['href']}")
+            page.goto(href["href"], wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(5000)
+
+        # Tenta ir para a home autenticada (Salto de Segurança)
+        print("Validando sessão na Home...")
+        page.goto(
+            "https://www.nfse.gov.br/EmissorNacional/",
+            wait_until="networkidle",
+            timeout=60000
+        )
+        page.wait_for_timeout(3000)
+
+        # Verificação de elementos de usuário logado
+        logado = page.evaluate("""() => {
+            const body = document.body.innerText.toLowerCase();
+            return {
+                tem_sair: body.includes('sair'),
+                tem_logout: body.includes('logout'),
+                tem_emitir: body.includes('emitir'),
+                tem_consultar: body.includes('consultar'),
+                tem_contribuinte: body.includes('contribuinte')
+            }
+        }""")
+        
+        print(f"Verificação de login: {logado}")
+
+        if logado["tem_sair"] or logado["tem_emitir"] or logado["tem_consultar"]:
+            print("Login confirmado com sucesso!")
+            return True
+
+        # Se falhou, tira print para debug
+        page.screenshot(path="/tmp/falha_login_detalhada.png")
+        raise Exception(f"Portal não autorizou acesso. URL final: {page.url}")
 
     except Exception as e:
-        page.screenshot(path="/tmp/erro_login_fatal.png")
-        print(f"Detalhes do erro: {traceback.format_exc()}")
+        print(f"Detalhes do erro no login: {traceback.format_exc()}")
         raise Exception(f"Falha no login: {str(e)}")
