@@ -7,14 +7,17 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
     try:
         print(f"Período: {data_inicio} a {data_fim}")
 
-        # ... (sua formatação de datas continua igual) ...
+        dt_ini = datetime.strptime(data_inicio, "%Y-%m-%d")
+        dt_fim = datetime.strptime(data_fim, "%Y-%m-%d")
+        data_ini_fmt = dt_ini.strftime("%d/%m/%Y")
+        data_fim_fmt = dt_fim.strftime("%d/%m/%Y")
 
         # =========================
         # LOGIN VIA CERTIFICADO (Ajustado)
         # =========================
         print("Acessando endpoint de autenticação por certificado...")
         
-        # Tentamos ir direto para o seletor de certificado
+        # 1. Tenta o acesso direto ao gatilho de certificado
         await page.goto(
             "https://www.nfse.gov.br/EmissorNacional/Login/Certificado",
             wait_until="networkidle",
@@ -24,15 +27,24 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         await page.wait_for_timeout(5000)
         print(f"URL após tentativa de login: {page.url}")
 
-        # Se ainda cair na tela de login, tentamos clicar no botão de certificado se ele existir
-        if "Login" in page.url:
+        # 2. Verifica se o Dashboard carregou (procurando um elemento comum de usuário logado)
+        # Se não encontrar o menu ou navbar, tenta forçar o clique no botão
+        if "Login" in page.url or await page.locator(".navbar").count() == 0:
             print("Sessão não entrou direto, tentando forçar clique no botão Certificado...")
-            btn_cert = page.locator("a:has-text('Certificado Digital'), button:has-text('Certificado')").first
+            
+            # Localiza o botão de certificado (pode aparecer na tela principal de login)
+            btn_cert = page.locator("a[href*='Login/Certificado'], button:has-text('Certificado')").first
+            
             if await btn_cert.count() > 0:
                 await btn_cert.click()
-                await page.wait_for_timeout(5000)
+                # Espera extra para o portal processar o certificado digital
+                await page.wait_for_timeout(8000) 
+            else:
+                # Se não houver botão e estiver no login, tenta ir para a Home para ver se o cookie "pegou"
+                await page.goto("https://www.nfse.gov.br/EmissorNacional/", wait_until="domcontentloaded")
 
         # VALIDAÇÃO FINAL
+        # Se após as tentativas ainda estiver na tela de login, interrompe
         if "Login" in page.url:
             await page.screenshot(path="/tmp/erro_login_detalhado.png")
             raise Exception("❌ Sessão não autenticada via Certificado")
@@ -55,28 +67,31 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         campo_ini = page.locator("#datainicio")
         await campo_ini.click()
         await page.keyboard.press("Control+A")
-        await page.keyboard.type(data_ini_fmt, delay=80)
+        await page.keyboard.press("Backspace") # Garante limpeza total
+        await page.keyboard.type(data_ini_fmt, delay=100)
         await page.keyboard.press("Tab")
 
-        await page.wait_for_timeout(500)
+        await page.wait_for_timeout(800)
 
         campo_fim = page.locator("#datafim")
         await campo_fim.click()
         await page.keyboard.press("Control+A")
-        await page.keyboard.type(data_fim_fmt, delay=80)
+        await page.keyboard.press("Backspace")
+        await page.keyboard.type(data_fim_fmt, delay=100)
         await page.keyboard.press("Tab")
 
-        await page.wait_for_timeout(500)
+        await page.wait_for_timeout(800)
 
         val_ini = await campo_ini.input_value()
         val_fim = await campo_fim.input_value()
 
-        print(f"Valores: {val_ini} até {val_fim}")
+        print(f"Valores nos campos: {val_ini} até {val_fim}")
 
         print("🔍 Filtrando...")
-        await page.locator("button:has-text('Filtrar')").first.click()
+        await page.locator("button:has-text('Filtrar')").first.click(force=True)
 
-        await page.wait_for_timeout(6000)
+        # Tempo maior para o portal processar a consulta
+        await page.wait_for_timeout(8000)
 
         # =========================
         # PAGINAÇÃO
@@ -109,7 +124,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 });
             }""")
 
-            print(f"Notas encontradas: {len(notas_raw)}")
+            print(f"Notas nesta página: {len(notas_raw)}")
 
             if not notas_raw:
                 break
@@ -124,14 +139,20 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 break
 
             try:
+                # Verifica se o botão não está desabilitado (classe 'disabled' comum em paginação)
+                is_disabled = await botao_proximo.first.evaluate("el => el.classList.contains('disabled') || el.getAttribute('disabled')")
+                if is_disabled:
+                    print("🚫 Botão próxima desabilitado")
+                    break
+                
                 await botao_proximo.first.click()
-                await page.wait_for_timeout(5000)
+                await page.wait_for_timeout(6000)
                 pagina += 1
             except:
-                print("🚫 Fim da paginação")
+                print("🚫 Fim da paginação ou erro ao clicar")
                 break
 
-        print(f"✅ Total de notas: {len(todas_notas)}")
+        print(f"✅ Total de notas capturadas: {len(todas_notas)}")
         return todas_notas
 
     except Exception as e:
