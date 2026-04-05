@@ -1,90 +1,115 @@
 import os
+import traceback
 from calendar import monthrange
 
 def consultar_notas(page, competencia: str):
     try:
+        # 1. Preparar Datas
         ano_str, mes_str = competencia.split("-")
         ano, mes = int(ano_str), int(mes_str)
         ultimo_dia = monthrange(ano, mes)[1]
-        data_ini = f"01/{mes:02d}/{ano}"
-        data_fim = f"{ultimo_dia:02d}/{mes:02d}/{ano}"
-        print(f"Período: {data_ini} a {data_fim}")
+        
+        # Datas sem barras para preenchimento mais seguro em campos com máscara
+        data_ini = f"01{mes:02d}{ano}"
+        data_fim = f"{ultimo_dia:02d}{mes:02d}{ano}"
+        
+        print(f"--- CONSULTA OPERACIONAL: {competencia} ---")
 
-        page.goto(
-            "https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas",
-            wait_until="networkidle",
-            timeout=60000
-        )
+        # 2. Navegação Direta
+        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle", timeout=60000)
         page.wait_for_timeout(3000)
 
-        # Preenche datas via JavaScript diretamente
-        preencheu = page.evaluate(f"""() => {{
-            const inputs = document.querySelectorAll('input[type="text"], input[type="date"]');
-            let preenchidos = 0;
-            inputs.forEach((inp, i) => {{
-                if (i === 0) {{ inp.value = '{data_ini}'; preenchidos++; }}
-                if (i === 1) {{ inp.value = '{data_fim}'; preenchidos++; }}
-            }});
-            return preenchidos;
-        }}""")
-        print(f"Campos preenchidos via JS: {preencheu}")
-
-        # Clica no botão filtrar
+        # 3. Preenchimento Robusto (Simulando usuário real)
+        # Procuramos por campos que pareçam datas
+        selector_data = "input.data, .form-control.data, input[placeholder*='/'], input[name*='Data']"
+        
         try:
-            page.locator("button:has-text('Filtrar')").first.click()
-            page.wait_for_timeout(4000)
-        except:
-            print("Botão filtrar não encontrado, usando tabela atual...")
+            page.wait_for_selector(selector_data, state="visible", timeout=15000)
+            inputs = page.locator(selector_data).all()
+            
+            if len(inputs) >= 2:
+                print(f"Preenchendo datas: {data_ini} e {data_fim}")
+                for i, valor in enumerate([data_ini, data_fim]):
+                    inputs[i].click()
+                    page.keyboard.press("Control+A")
+                    page.keyboard.press("Backspace")
+                    page.keyboard.type(valor, delay=60)
+                    page.keyboard.press("Tab")
+                    page.wait_for_timeout(500)
 
-        # Captura todas as URLs de download direto da página via JavaScript
-        urls_download = page.evaluate("""() => {
-            const links = document.querySelectorAll('a[href*="Download/NFSe"]');
-            return Array.from(links).map(a => ({
-                href: a.href,
-                text: a.innerText.trim()
-            }));
-        }""")
-        print(f"URLs de download encontradas: {len(urls_download)}")
-        for u in urls_download:
-            print(f"  {u}")
+                # Clicar em Filtrar
+                page.locator("button:has-text('Filtrar'), #btnFiltrar, .btn-primary").first.click()
+                page.wait_for_timeout(5000)
+            else:
+                print("Campos de data não encontrados da forma esperada. Verificando se há notas na tela...")
+        except Exception as e_filtro:
+            print(f"Aviso no filtro: {e_filtro}")
 
-        # Monta lista de notas com URLs diretas
-        notas = []
-        for i, url_info in enumerate(urls_download):
-            href = url_info["href"]
-            # Extrai número da nota da URL
-            numero = href.split("/")[-1] if href else f"nota_{i}"
-            notas.append({
-                "numero": numero,
-                "url_download": href,
-                "linha": None
-            })
+        # 4. Coleta das Notas da Tabela
+        notas_encontradas = []
+        # Espera a tabela carregar os resultados
+        page.wait_for_selector("table tbody tr", timeout=10000)
+        linhas = page.locator("table tbody tr").all()
+        
+        for linha in linhas:
+            texto_linha = linha.inner_text().strip()
+            # Ignora avisos de "nada encontrado" ou linhas vazias
+            if "Nenhum registro" in texto_linha or not texto_linha or len(texto_linha) < 10:
+                continue
+            
+            colunas = linha.locator("td").all()
+            if len(colunas) > 0:
+                # Pega o número da nota (geralmente primeira coluna)
+                num_nota = colunas[0].inner_text().split('\n')[0].strip()
+                
+                # Guardamos a referência da LINHA para o baixar_xml clicar nela depois
+                notas_encontradas.append({
+                    "numero": num_nota,
+                    "linha": linha
+                })
 
-        print(f"Total de notas: {len(notas)}")
-        return notas
+        print(f"Sucesso! Notas detectadas: {len(notas_encontradas)}")
+        return notas_encontradas
 
     except Exception as e:
         page.screenshot(path="/tmp/erro_consulta.png")
-        raise Exception(f"Erro na consulta: {str(e)}")
+        print(f"Erro detalhado na consulta: {traceback.format_exc()}")
+        return []
 
 def baixar_xml(page, nota: dict, download_dir: str):
+    """
+    Esta função faz o 'balé' de clicar nos três pontos e depois no download.
+    """
     try:
-        print(f"Baixando nota {nota['numero']}...")
-        url = nota.get("url_download")
-        if not url:
-            print("Sem URL de download")
-            return False
+        print(f"Baixando XML da nota {nota['numero']}...")
+        caminho_local = os.path.join(download_dir, f"{nota['numero']}.xml")
 
-        caminho = os.path.join(download_dir, f"{nota['numero']}.xml")
+        # 1. Garantir que a linha está visível
+        nota["linha"].scroll_into_view_if_needed()
+        
+        # 2. Clicar no botão de Ações (os três pontos ou ícone de lista)
+        # Seletores comuns no portal nacional
+        btn_acoes = nota["linha"].locator("button i.fa-ellipsis-v, button.dropdown-toggle, [title*='Ações']").first
+        btn_acoes.click()
+        page.wait_for_timeout(1500)
 
-        with page.expect_download(timeout=60000) as download_info:
-            page.goto(url)
-
+        # 3. Clicar na opção Download XML que apareceu no menu suspenso
+        # Usamos o seletor de link que contenha o texto de download
+        btn_download = page.locator("a:has-text('Download XML'), [href*='Download/NFSe/']").first
+        
+        with page.expect_download(timeout=30000) as download_info:
+            btn_download.click()
+        
         download = download_info.value
-        download.save_as(caminho)
-        print(f"XML salvo: {caminho}")
+        download.save_as(caminho_local)
+        
+        # Fecha o menu (pressionando Esc) para não atrapalhar a próxima linha
+        page.keyboard.press("Escape")
+        print(f"Download concluído: {nota['numero']}")
         return True
 
     except Exception as e:
-        print(f"Erro ao baixar {nota['numero']}: {str(e)}")
+        print(f"Erro ao baixar nota {nota.get('numero')}: {str(e)}")
+        # Tenta fechar qualquer menu aberto para a próxima tentativa
+        page.keyboard.press("Escape")
         return False
