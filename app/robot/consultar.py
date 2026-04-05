@@ -78,44 +78,45 @@ def consultar_notas(page, competencia: str):
 
 def baixar_xml(page, nota: dict, download_dir: str):
     try:
-        print(f"Tentando baixar nota: {nota['numero']}")
+        print(f"Iniciando download da nota: {nota['numero']}")
         caminho_local = os.path.join(download_dir, f"{nota['numero']}.xml")
 
-        # 1. Localiza a linha e rola até ela
+        # 1. Localiza a linha
         linha = nota["linha"]
         linha.scroll_into_view_if_needed()
         
-        # 2. Localiza o botão de ações (tentando múltiplos seletores comuns)
-        # Adicionei o seletor .btn-sm e removi a dependência estrita do ícone
-        btn_acoes = linha.locator("button.dropdown-toggle, button[id*='btnAcoes'], .btn-sm, i.fa-ellipsis-v").first
+        # 2. SELETOR AJUSTADO: No print, o botão de ações é um link ou botão 
+        # que geralmente fica na última coluna. Vamos buscar pelo ícone de engrenagem
+        # ou pela classe de dropdown do portal.
+        btn_acoes = linha.locator("a[data-toggle='dropdown'], button[data-toggle='dropdown'], i.fa-cog, i.fa-ellipsis-v").first
         
-        # Tenta clicar de forma humana, se falhar, força via JS
-        try:
-            btn_acoes.click(timeout=10000)
-        except:
-            print("Clique normal falhou, forçando clique via JS no botão de ações...")
-            page.evaluate("el => el.click()", btn_acoes.element_handle())
+        # Forçamos o clique via JS porque esses botões de grade às vezes têm 
+        # overlays invisíveis que bloqueiam o clique do Playwright
+        page.evaluate("el => el.click()", btn_acoes.element_handle())
+        page.wait_for_timeout(1000)
 
-        page.wait_for_timeout(1500)
-
-        # 3. Localiza o link de Download XML no menu que abriu
-        # Agora buscamos por qualquer link que tenha 'Download' ou 'XML' no texto
-        btn_download = page.locator("a:has-text('Download'), a:has-text('XML'), [href*='Download/NFSe']").first
+        # 3. SELETOR DO DOWNLOAD: O print mostra o texto exato "<> Download XML"
+        # O seletor "has-text" é o mais seguro aqui.
+        btn_download = page.locator("a:has-text('Download XML')").first
         
-        print(f"Iniciando captura do arquivo para nota {nota['numero']}...")
-        with page.expect_download(timeout=45000) as download_info:
-            # Força o clique no download também para evitar bloqueios de UI
+        if not btn_download.is_visible():
+            # Tenta um seletor alternativo caso o texto mude levemente
+            btn_download = page.locator("a[href*='Download/NFSe']").first
+
+        print(f"Clicando no link de XML para a nota {nota['numero']}...")
+        
+        with page.expect_download(timeout=60000) as download_info:
             page.evaluate("el => el.click()", btn_download.element_handle())
         
         download = download_info.value
         download.save_as(caminho_local)
         
-        # Fecha o menu para a próxima linha não encontrar o menu anterior aberto
+        # Fecha o menu para não atrapalhar a próxima linha
         page.keyboard.press("Escape")
-        print(f"Sucesso! XML salvo em: {caminho_local}")
+        print(f"Sucesso: {nota['numero']}.xml baixado.")
         return True
 
     except Exception as e:
-        print(f"Erro fatal no download da nota {nota.get('numero')}: {str(e)}")
-        page.keyboard.press("Escape") # Tenta limpar o estado da tela
+        print(f"Falha na nota {nota.get('numero')}: {str(e)}")
+        page.keyboard.press("Escape")
         return False
