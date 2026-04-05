@@ -1,49 +1,63 @@
 import os
 import re
 
-def consultar_notas(page, competencia: str):
+def consultar_notas(page, data_inicio: str, data_fim: str):
     try:
-        print(f"--- INICIANDO CAPTURA VIA PERÍODO (Competência {competencia}) ---")
-        # Ajustando para a URL de consulta detalhada
+        print(f"--- INICIANDO CAPTURA VIA PERÍODO ---")
+        print(f"-> Período: {data_inicio} até {data_fim}")
+        
+        # Acessa a página de notas emitidas
         page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle", timeout=60000)
         
-        # 1. Preenchimento por Datas (Baseado na sua sugestão de ser mais fácil)
-        # Assumindo que a competência venha como '2026-03'
-        ano, mes = competencia.split('-')
-        data_ini = f"01/{mes}/{ano}"
-        data_fim = f"31/{mes}/{ano}" # Simplificado, o portal costuma aceitar 31 para todos
+        # Aguarda os campos de data ficarem visíveis
+        page.wait_for_selector("input[name*='DataEmissaoInicio']", timeout=15000)
 
-        print(f"-> Filtrando de {data_ini} até {data_fim}...")
+        # Converte as datas de AAAA-MM-DD (HTML) para DD/MM/AAAA (Portal) se necessário
+        if '-' in data_inicio:
+            ano_i, mes_i, dia_i = data_inicio.split('-')
+            data_inicio = f"{dia_i}/{mes_i}/{ano_i}"
         
-        # Seleciona filtro por data e preenche (IDs comuns nesses portais)
-        page.fill("input[name*='DataEmissaoInicio']", data_ini)
-        page.fill("input[name*='DataEmissaoFim']", data_fim)
-        page.click("button[type='submit']")
+        if '-' in data_fim:
+            ano_f, mes_f, dia_f = data_fim.split('-')
+            data_fim = f"{dia_f}/{mes_f}/{ano_f}"
+
+        # Preenchimento garantido: Limpa e Digita
+        page.locator("input[name*='DataEmissaoInicio']").fill("")
+        page.locator("input[name*='DataEmissaoInicio']").type(data_inicio, delay=50)
         
-        page.wait_for_selector("table tbody tr", timeout=30000)
-        page.wait_for_timeout(3000)
+        page.locator("input[name*='DataEmissaoFim']").fill("")
+        page.locator("input[name*='DataEmissaoFim']").type(data_fim, delay=50)
+
+        print(f"-> Aplicando filtros no portal...")
+        # Clica no botão de consulta (geralmente o botão principal de submit do form de filtros)
+        page.click("button.btn-primary, button[type='submit']")
+        
+        # Aguarda a tabela atualizar
+        page.wait_for_timeout(5000)
+        page.wait_for_selector("table tbody", timeout=30000)
 
         notas = page.evaluate("""() => {
             const rows = Array.from(document.querySelectorAll('table tbody tr'));
             return rows.map((row, i) => ({
                 index: i,
-                texto: row.innerText
+                texto: row.innerText,
+                // Tenta capturar o ID diretamente do HTML caso já esteja lá (data-chave)
+                html: row.innerHTML
             })).filter(r => r.texto.length > 10 && !r.texto.includes('Nenhum registro'));
         }""")
         
-        print(f"Notas detectadas: {len(notas)}")
+        print(f"Notas detectadas após filtro: {len(notas)}")
         return notas
     except Exception as e:
         print(f"Erro na consulta: {e}")
         return []
 
 def baixar_xml(page, nota: dict, download_dir: str):
-    # Lista para armazenar o ID capturado via rede
     capturado = {"id": None}
 
-    # Interceptador de Respostas de Rede (Pega o ID quando ele viaja do servidor)
     def check_network(response):
-        if "Download/NFSe" in response.url or "Visualizar" in response.url:
+        # Escuta URLs que contenham o padrão de download de XML
+        if "Download/NFSe" in response.url:
             match = re.search(r'/([0-9]{40,60})', response.url)
             if match:
                 capturado["id"] = match.group(1)
@@ -52,27 +66,34 @@ def baixar_xml(page, nota: dict, download_dir: str):
         idx = nota["index"]
         page.on("response", check_network)
         
-        print(f"-> Forçando ativação da nota {idx}...")
-        linha = page.locator("table tbody tr").nth(idx)
+        print(f"-> Processando nota {idx}...")
         
-        # Tenta clicar no botão de ações ou na linha
-        linha.click()
-        page.wait_for_timeout(3000)
+        # 1. Tenta extrair o ID que já veio no HTML (estratégia mais rápida)
+        id_match = re.search(r'Download/NFSe/([0-9]{40,60})', nota.get('html', ''))
+        if id_match:
+            capturado["id"] = id_match.group(1)
+            print(f"   [INFO] ID extraído diretamente da linha.")
 
-        # Se não pegou na rede, tenta o plano C: Atributo data-chave que você viu
+        # 2. Se não achou, clica na linha para forçar o carregamento do link/popover
         if not capturado["id"]:
-            capturado["id"] = page.evaluate(f"""() => {{
-                const row = document.querySelectorAll('table tbody tr')[{idx}];
-                const href = row.innerHTML.match(/Download\/NFSe\/([0-9]{{40,60}})/);
-                return href ? href[1] : null;
-            }}""")
+            linha = page.locator("table tbody tr").nth(idx)
+            linha.click()
+            page.wait_for_timeout(2000)
+            
+            # Tenta buscar o link no corpo da página após o clique
+            capturado["id"] = page.evaluate("""() => {
+                const match = document.body.innerHTML.match(/Download\/NFSe\/([0-9]{40,60})/);
+                return match ? match[1] : null;
+            }""")
 
         if capturado["id"]:
             id_nota = capturado["id"]
             url_direta = f"https://www.nfse.gov.br/EmissorNacional/Notas/Download/NFSe/{id_nota}"
-            print(f"   [SUCESSO] ID capturado: ...{id_nota[-10:]}")
+            print(f"   [ALVO] Link identificado: ...{id_nota[-10:]}")
             
             caminho_local = os.path.join(download_dir, f"{id_nota}.xml")
+            
+            # Realiza o download via URL direta para evitar cliques errados em popovers
             with page.expect_download(timeout=60000) as download_info:
                 page.goto(url_direta)
             
@@ -81,7 +102,7 @@ def baixar_xml(page, nota: dict, download_dir: str):
             page.remove_listener("response", check_network)
             return True
         else:
-            print(f"   [ERRO] Nota {idx} não revelou o ID.")
+            print(f"   [ERRO] Não foi possível obter o identificador da nota {idx}.")
             page.remove_listener("response", check_network)
             return False
 
