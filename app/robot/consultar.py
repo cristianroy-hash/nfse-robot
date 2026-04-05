@@ -4,13 +4,21 @@ import re
 def consultar_notas(page, data_inicio: str, data_fim: str):
     try:
         print(f"--- INICIANDO CAPTURA VIA PERÍODO ---")
-        print(f"-> Período: {data_inicio} até {data_fim}")
         
-        # Acessa a página de notas emitidas
-        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle", timeout=60000)
+        # 1. Força a ida para a URL de Notas Emitidas
+        # Adicionei um wait_until="load" para garantir que o menu carregou
+        page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="load", timeout=60000)
         
-        # Aguarda os campos de data ficarem visíveis
-        page.wait_for_selector("input[name*='DataEmissaoInicio']", timeout=15000)
+        # 2. Pequena pausa para o JavaScript do portal "assentar"
+        page.wait_for_timeout(5000)
+
+        # 3. Se ainda não encontrar o seletor, tenta recarregar a URL uma vez
+        try:
+            page.wait_for_selector("input[name*='DataEmissaoInicio']", timeout=10000)
+        except:
+            print("-> Campo não apareceu. Tentando recarregar a página de consulta...")
+            page.goto("https://www.nfse.gov.br/EmissorNacional/NFSes/Emitidas", wait_until="networkidle")
+            page.wait_for_selector("input[name*='DataEmissaoInicio']", timeout=20000)
 
         # Converte as datas de AAAA-MM-DD (HTML) para DD/MM/AAAA (Portal) se necessário
         if '-' in data_inicio:
