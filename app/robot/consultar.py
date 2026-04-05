@@ -1,24 +1,22 @@
-print("🔥 consultar.py carregado")
-
 import os
 import asyncio
 from datetime import datetime
-from playwright.async_api import async_playwright
 
-CERT_PATH = "/app/certificado.pfx"   # caminho no Railway
+print("🔥 consultar.py carregado")
+
+CERT_PATH = "/app/certificado.pfx"
 CERT_PASSWORD = "SENHA_DO_CERT"
 
-# =========================
-# LOGIN COM CERTIFICADO REAL
-# =========================
+
 async def criar_contexto_com_certificado(browser):
+    with open(CERT_PATH, "rb") as f:
+        cert_bytes = f.read()
+
     context = await browser.new_context(
         ignore_https_errors=True,
-
-        # 🔥 ESSENCIAL: certificado cliente
         client_certificates=[{
             "origin": "https://www.nfse.gov.br",
-            "pfxPath": CERT_PATH,
+            "pfx": cert_bytes,
             "passphrase": CERT_PASSWORD
         }]
     )
@@ -26,32 +24,8 @@ async def criar_contexto_com_certificado(browser):
     return context
 
 
-async def realizar_login(page):
-    print("🔐 Acessando portal com certificado...")
-
-    await page.goto(
-        "https://www.nfse.gov.br/EmissorNacional",
-        wait_until="networkidle",
-        timeout=90000
-    )
-
-    await page.wait_for_timeout(8000)
-
-    print("URL após acesso:", page.url)
-
-    # Se ainda estiver em login → falhou
-    if "login" in page.url.lower():
-        await page.screenshot(path="/tmp/erro_login.png")
-        raise Exception("❌ Certificado não autenticou corretamente")
-
-    print("✅ Login via certificado OK")
-
-
-# =========================
-# CONSULTA
-# =========================
 async def consultar_notas(page, data_inicio, data_fim):
-    print(f"📄 Consultando: {data_inicio} até {data_fim}")
+    print("📄 Iniciando consulta...")
 
     dt_ini = datetime.strptime(data_inicio, "%Y-%m-%d")
     dt_fim = datetime.strptime(data_fim, "%Y-%m-%d")
@@ -67,14 +41,13 @@ async def consultar_notas(page, data_inicio, data_fim):
 
     await page.wait_for_timeout(5000)
 
-    print("URL consulta:", page.url)
+    print("URL:", page.url)
 
     if "login" in page.url.lower():
-        raise Exception("❌ Sessão inválida — certificado não autenticou")
+        raise Exception("❌ Não autenticado")
 
     await page.wait_for_selector("#datainicio", timeout=60000)
 
-    # Preenche datas
     await page.fill("#datainicio", data_ini_fmt)
     await page.fill("#datafim", data_fim_fmt)
 
@@ -102,35 +75,25 @@ async def consultar_notas(page, data_inicio, data_fim):
     return notas
 
 
-# =========================
-# MAIN
-# =========================
-async def executar_fluxo(data_inicio, data_fim):
-    async with async_playwright() as p:
+async def baixar_xml(page, nota, download_dir):
+    try:
+        url = nota.get("url_download")
+        chave = nota.get("chave_acesso")
 
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
-        )
+        if not url:
+            return False
 
-        # 🔥 AQUI ESTÁ A CORREÇÃO REAL
-        context = await criar_contexto_com_certificado(browser)
+        caminho = os.path.join(download_dir, f"{chave}.xml")
 
-        page = await context.new_page()
+        async with page.expect_download(timeout=40000) as download_info:
+            await page.evaluate(f"window.open('{url}', '_blank')")
 
-        try:
-            await realizar_login(page)
+        download = await download_info.value
+        await download.save_as(caminho)
 
-            cookies = await context.cookies()
-            print("🍪 Cookies:", len(cookies))
+        print(f"✅ XML: {chave}")
+        return True
 
-            notas = await consultar_notas(page, data_inicio, data_fim)
-
-            print("🚀 Finalizado")
-
-        finally:
-            await browser.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(executar_fluxo("2026-03-01", "2026-03-31"))
+    except Exception as e:
+        print("Erro download:", str(e))
+        return False
