@@ -1,7 +1,8 @@
 import os
 import tempfile
 import traceback
-import asyncio  # Importante para garantir suporte a async se necessário
+import asyncio
+import shutil
 from app.robot.browser import criar_browser_com_certificado
 from app.robot.login_cert import login_certificado
 from app.robot.consultar import consultar_notas, baixar_xml
@@ -30,7 +31,6 @@ def salvar_no_supabase(client_id: str, periodo: str, numero: str, caminho_local:
         print(f"Erro Supabase: {str(e)}")
         return None
 
-# ALTERAÇÃO CRÍTICA: Adicionado 'async' antes de 'def'
 async def executar_importacao(job_id: str, payload: dict, jobs: dict):
     p = None
     browser = None
@@ -46,17 +46,16 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
         data_fim = payload.get("data_fim")
         periodo_str = f"{data_inicio}_{data_fim}"
 
-        # Se criar_browser_com_certificado for síncrono, mantenha assim. 
-        # Se for assíncrono, adicione await.
+        # Criar browser com certificado
         p, browser, context, page, cert_path, key_path = criar_browser_com_certificado(
             payload["certificado_base64"],
             payload["certificado_senha"]
         )
 
-        # Se login_certificado for async, adicione await login_certificado(page)
+        # Realiza login (Se for async no seu robot, use await)
         login_certificado(page)
         
-        # AGORA FUNCIONARÁ: Esperando a corrotina das notas
+        # Consulta notas (Async)
         notas = await consultar_notas(page, data_inicio, data_fim) 
         
         jobs[job_id]["notas_encontradas"] = len(notas)
@@ -64,18 +63,14 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
 
         for nota in notas:
             try:
-                # O baixar_xml salvará o arquivo no diretório temporário
-                # Usamos await pois alteramos o consultar.py para async
+                # Baixa o XML (Async)
                 sucesso = await baixar_xml(page, nota, tmp_dir)
                 
                 if sucesso:
-                    # Melhoria: Buscar o arquivo específico que acabou de ser baixado
-                    # O robô usa a chave_acesso ou data_chave como nome
+                    # Busca o arquivo que acabou de ser baixado
                     arquivos = [f for f in os.listdir(tmp_dir) if f.endswith(".xml")]
                     
-                    if arquivos:
-                        # Pegamos o arquivo mais recente ou o único na pasta
-                        nome_arquivo = arquivos[0] 
+                    for nome_arquivo in arquivos:
                         caminho_local = os.path.join(tmp_dir, nome_arquivo)
                         
                         if SUPABASE_URL and SUPABASE_KEY:
@@ -86,9 +81,8 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
                                 caminho_local
                             )
                         
-                        # Limpeza imediata para não acumular arquivos no container
+                        # Remove o arquivo local após o upload
                         os.remove(caminho_local)
-                        
                         xmls_baixados += 1
                         jobs[job_id]["notas_importadas"] = xmls_baixados
                     
@@ -106,11 +100,11 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
         print(f"Job {job_id} falhou: {traceback.format_exc()}")
 
     finally:
-        # Limpeza robusta
+        # Limpeza robusta de recursos
         try:
             if browser:
-                # Se fechar o browser for async no seu setup: await browser.close()
-                browser.close()
+                # No Playwright async, o close também deve ser await
+                await browser.close()
             if p:
                 p.stop()
             if cert_path and os.path.exists(cert_path):
@@ -118,7 +112,6 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
             if key_path and os.path.exists(key_path):
                 os.remove(key_path)
             if os.path.exists(tmp_dir):
-                import shutil
-                shutil.rmtree(tmp_dir) # Remove a pasta temporária inteira
-        except:
-            pass
+                shutil.rmtree(tmp_dir)
+        except Exception as e_clean:
+            print(f"Erro na limpeza: {str(e_clean)}")
