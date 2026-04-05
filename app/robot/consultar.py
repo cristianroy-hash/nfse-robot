@@ -7,77 +7,112 @@ def consultar_notas(page, data_inicio: str, data_fim: str):
     try:
         print(f"Período: {data_inicio} a {data_fim}")
 
+        # ================================
+        # FORMATAR DATAS
+        # ================================
         dt_ini = datetime.strptime(data_inicio, "%Y-%m-%d")
         dt_fim = datetime.strptime(data_fim, "%Y-%m-%d")
         data_ini_fmt = dt_ini.strftime("%d/%m/%Y")
         data_fim_fmt = dt_fim.strftime("%d/%m/%Y")
 
-        # 🔥 AQUI ESTÁ A MUDANÇA CRÍTICA
-        print("Acessando área protegida (forçando certificado)...")
+        print(f"Datas formatadas: {data_ini_fmt} a {data_fim_fmt}")
 
-        # =========================
-        # ACESSA PÁGINA
-        # =========================
+        # ================================
+        # 🔥 AUTENTICAÇÃO VIA CERTIFICADO
+        # ================================
+        print("Acessando portal raiz para autenticação...")
+
         page.goto(
-            "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
+            "https://www.nfse.gov.br/EmissorNacional/",
             wait_until="networkidle",
             timeout=60000
         )
+
         page.wait_for_timeout(5000)
 
         print(f"URL após acesso: {page.url}")
 
-        # 🔥 VALIDA SE LOGOU
+        # Valida se autenticou
         if "Login" in page.url:
             raise Exception("❌ Certificado não autenticou (continua no login)")
 
         print("✅ Autenticado com sucesso!")
 
-        # 🔥 AGORA SIM vai para notas
+        # ================================
+        # IR PARA PÁGINA DE NOTAS
+        # ================================
         page.goto(
             "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
             wait_until="networkidle",
             timeout=60000
         )
+
         page.wait_for_timeout(3000)
 
-        # =========================
-        # PREENCHE DATAS
-        # =========================
+        # ================================
+        # PREENCHER FILTROS
+        # ================================
         print("Preenchendo data inicial...")
         campo_ini = page.locator("#datainicio")
         campo_ini.click()
         page.keyboard.press("Control+A")
         page.keyboard.type(data_ini_fmt, delay=80)
+        page.keyboard.press("Tab")
+        page.wait_for_timeout(500)
 
         print("Preenchendo data final...")
         campo_fim = page.locator("#datafim")
         campo_fim.click()
         page.keyboard.press("Control+A")
         page.keyboard.type(data_fim_fmt, delay=80)
+        page.keyboard.press("Tab")
+        page.wait_for_timeout(500)
 
+        # Validar preenchimento
+        val_ini = page.locator("#datainicio").input_value()
+        val_fim = page.locator("#datafim").input_value()
+        print(f"Valores nos campos: {val_ini} a {val_fim}")
+
+        # ================================
+        # FILTRAR
+        # ================================
         print("Clicando em Filtrar...")
         page.locator("button:has-text('Filtrar')").first.click()
         page.wait_for_timeout(6000)
 
-        # =========================
-        # PAGINAÇÃO
-        # =========================
+        # ================================
+        # EXTRAÇÃO COM PAGINAÇÃO
+        # ================================
         todas_notas = []
         pagina = 1
 
         while True:
-            print(f"📄 Lendo página {pagina}")
+            print(f"📄 Lendo página {pagina}...")
 
             notas_raw = page.evaluate("""() => {
                 const rows = document.querySelectorAll('table tbody tr[data-chave]');
                 return Array.from(rows).map(row => {
+                    const chaveEncoded = row.getAttribute('data-chave');
+                    const situacao = row.getAttribute('data-situacao') || '';
+                    const valor = row.getAttribute('data-valor') || '';
+
+                    const tdData = row.querySelector('.td-data');
+                    const data = tdData ? tdData.innerText.trim() : '';
+
+                    const tdTomador = row.querySelector('.td-texto-grande');
+                    const tomador = tdTomador ? tdTomador.innerText.trim().substring(0, 60) : '';
+
                     const htmlRow = row.innerHTML;
                     const matchChave = htmlRow.match(/Download\\/NFSe\\/([0-9]{40,60})/);
                     const chaveNumerica = matchChave ? matchChave[1] : null;
 
                     return {
+                        data_chave: chaveEncoded,
                         chave_acesso: chaveNumerica,
+                        situacao: situacao,
+                        valor: valor,
+                        data: data,
+                        tomador: tomador,
                         url_download: chaveNumerica
                             ? 'https://www.nfse.gov.br/EmissorNacional/Notas/Download/NFSe/' + chaveNumerica
                             : null
@@ -85,33 +120,31 @@ def consultar_notas(page, data_inicio: str, data_fim: str):
                 });
             }""")
 
-            print(f"➡️ {len(notas_raw)} notas nesta página")
+            print(f"Notas encontradas na página {pagina}: {len(notas_raw)}")
 
             if len(notas_raw) == 0:
-                print("🚫 Nenhuma nota encontrada")
                 break
 
             todas_notas.extend(notas_raw)
 
-            # =========================
-            # BOTÃO PRÓXIMO
-            # =========================
-            botao_proximo = page.locator(
-                "li.page-item:not(.disabled) a[aria-label='Próximo'], li.page-item:not(.disabled) a:has-text('›')"
-            )
+            # ================================
+            # PAGINAÇÃO
+            # ================================
+            botao_proximo = page.locator("a[rel='next'], button[aria-label='Próxima']")
 
             if botao_proximo.count() == 0:
-                print("🚫 Última página atingida")
+                print("🚫 Não há botão de próxima página")
                 break
 
-            try:
-                print("➡️ Indo para próxima página...")
-                botao_proximo.first.click()
-                page.wait_for_timeout(5000)
-                pagina += 1
-            except Exception as e:
-                print(f"Erro ao navegar página: {str(e)}")
+            if not botao_proximo.is_enabled():
+                print("🚫 Botão de próxima desabilitado")
                 break
+
+            print("➡️ Indo para próxima página...")
+            botao_proximo.click()
+            page.wait_for_timeout(5000)
+
+            pagina += 1
 
         print(f"✅ Total de notas coletadas: {len(todas_notas)}")
 
@@ -122,38 +155,29 @@ def consultar_notas(page, data_inicio: str, data_fim: str):
         raise Exception(f"Erro na consulta: {str(e)}")
 
 
-# =========================
-# DOWNLOAD XML (MANTIDO)
-# =========================
 def baixar_xml(page, nota: dict, download_dir: str):
     try:
         url = nota.get("url_download")
-        chave = nota.get("chave_acesso") or nota.get("data_chave", "desconhecido")
-        nome_arquivo = nota.get("chave_acesso") or nota.get("data_chave", "nota")
-
-        print(f"Baixando nota ...{str(chave)[-10:]}...")
+        chave = nota.get("chave_acesso") or nota.get("data_chave", "nota")
 
         if not url:
-            print("Sem URL de download")
             return False
 
-        caminho = os.path.join(download_dir, f"{nome_arquivo}.xml")
+        caminho = os.path.join(download_dir, f"{chave}.xml")
 
-        with page.expect_download(timeout=60000) as download_info:
-            page.evaluate(f"window.open('{url}', '_blank')")
-
-        download = download_info.value
-        download.save_as(caminho)
-
-        print(f"XML salvo: {caminho}")
-        return True
-
-    except Exception as e:
-        print(f"Erro ao baixar nota {str(chave)[-10:]}: {str(e)}")
-
-        # fallback via fetch
         try:
-            print("Tentando download via fetch...")
+            with page.expect_download(timeout=60000) as download_info:
+                page.evaluate(f"window.open('{url}', '_blank')")
+
+            download = download_info.value
+            download.save_as(caminho)
+
+            print(f"XML salvo: {caminho}")
+            return True
+
+        except Exception:
+            print("Tentando fallback via fetch...")
+
             conteudo = page.evaluate(f"""async () => {{
                 const r = await fetch('{url}', {{
                     credentials: 'include',
@@ -165,14 +189,12 @@ def baixar_xml(page, nota: dict, download_dir: str):
             if conteudo and len(conteudo) > 100:
                 with open(caminho, 'w', encoding='utf-8') as f:
                     f.write(conteudo)
+
                 print(f"XML salvo via fetch: {caminho}")
                 return True
-
-        except Exception as e2:
-            print(f"Fallback fetch falhou: {str(e2)}")
 
         return False
 
     except Exception as e:
-        print(f"Erro ao baixar nota {chave}: {str(e)}")
+        print(f"Erro ao baixar XML: {str(e)}")
         return False
