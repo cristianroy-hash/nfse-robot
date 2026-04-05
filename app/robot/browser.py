@@ -2,45 +2,48 @@ import tempfile
 import os
 import base64
 from playwright.sync_api import sync_playwright
-from cryptography.hazmat.primitives.serialization import pkcs12, Encoding, PrivateFormat, NoEncryption
-
-def pfx_para_pem(certificado_base64: str, senha: str):
-    cert_bytes = base64.b64decode(certificado_base64)
-    
-    private_key, certificate, _ = pkcs12.load_key_and_certificates(
-        cert_bytes, senha.encode()
-    )
-    
-    cert_pem = certificate.public_bytes(Encoding.PEM)
-    key_pem = private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
-    
-    cert_file = tempfile.NamedTemporaryFile(suffix=".pem", delete=False)
-    cert_file.write(cert_pem)
-    cert_file.close()
-    
-    key_file = tempfile.NamedTemporaryFile(suffix=".pem", delete=False)
-    key_file.write(key_pem)
-    key_file.close()
-    
-    return cert_file.name, key_file.name
 
 def criar_browser_com_certificado(certificado_base64: str, senha: str):
-    cert_path, key_path = pfx_para_pem(certificado_base64, senha)
+    # 1. Decodifica e salva o PFX original em um arquivo temporário
+    # O Playwright 1.46+ prefere lidar diretamente com o PFX para mTLS
+    cert_bytes = base64.b64decode(certificado_base64)
     
+    # Criamos o arquivo temporário .pfx
+    fd, pfx_path = tempfile.mkstemp(suffix=".pfx")
+    try:
+        with os.fdopen(fd, 'wb') as tmp:
+            tmp.write(cert_bytes)
+    except Exception as e:
+        os.close(fd)
+        raise Exception(f"Falha ao salvar certificado temporário: {str(e)}")
+
+    # 2. Inicia o Playwright
     p = sync_playwright().start()
+    
+    # Argumentos otimizados para rodar em containers (Railway)
     browser = p.chromium.launch(
         headless=True,
-        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+        args=[
+            "--no-sandbox", 
+            "--disable-setuid-sandbox", 
+            "--disable-dev-shm-usage",
+            "--ignore-certificate-errors" # Ajuda em portais governamentais com cadeias de cert incompletas
+        ]
     )
+
+    # 3. Cria o contexto usando 'pfxPath' em vez de separar cert/key
+    # Isso é muito mais robusto no Linux
     context = browser.new_context(
         client_certificates=[{
             "origin": "https://www.nfse.gov.br",
-            "certPath": cert_path,
-            "keyPath": key_path,
-            "passphrase": senha
+            "pfxPath": pfx_path,
+            "password": senha
         }]
     )
+
     page = context.new_page()
     page.set_default_timeout(60000)
     
-    return p, browser, context, page, cert_path, key_path
+    # Retornamos pfx_path duas vezes para manter compatibilidade com o 
+    # desempacotamento (cert_path, key_path) no seu import_service.py
+    return p, browser, context, page, pfx_path, pfx_path
