@@ -1,50 +1,61 @@
 def consultar_notas(page, competencia: str):
     try:
-        # Navega para consulta de NFS-e
-        page.goto("https://www.nfse.gov.br/EmissorNacional/NotaFiscal/Consultar", wait_until="networkidle")
-        page.wait_for_timeout(2000)
-
-        # Preenche competência (formato YYYY-MM)
         ano, mes = competencia.split("-")
         
-        # Aguarda campo de competência aparecer
-        page.wait_for_selector("input[name='competencia']", timeout=10000)
-        page.fill("input[name='competencia']", f"{mes}/{ano}")
+        # Navega para consulta de notas
+        page.goto(
+            "https://www.nfse.gov.br/EmissorNacional/NotaFiscal/Consultar",
+            wait_until="networkidle"
+        )
+        page.wait_for_timeout(2000)
+
+        # Preenche filtro de competência
+        page.wait_for_selector("input[name='Competencia']", timeout=10000)
+        page.fill("input[name='Competencia']", f"{mes}/{ano}")
 
         # Clica em pesquisar
         page.click("button[type='submit']")
         page.wait_for_timeout(3000)
 
-        # Coleta as notas listadas
+        # Coleta links/botões de download de cada nota
         notas = []
-        itens = page.query_selector_all(".nota-fiscal-item")
+        linhas = page.query_selector_all("table tbody tr")
         
-        for item in itens:
-            numero = item.query_selector(".numero-nota")
-            if numero:
-                notas.append({
-                    "numero": numero.inner_text().strip(),
-                    "elemento": item
-                })
+        for i, linha in enumerate(linhas):
+            try:
+                numero_el = linha.query_selector("td:first-child")
+                numero = numero_el.inner_text().strip() if numero_el else f"nota_{i}"
+                notas.append({"numero": numero, "linha": linha, "index": i})
+            except:
+                continue
 
+        print(f"Notas encontradas: {len(notas)}")
         return notas
 
     except Exception as e:
         raise Exception(f"Falha ao consultar notas: {str(e)}")
 
 
-def baixar_xml(page, nota: dict):
+def baixar_xml(page, nota: dict, download_dir: str):
+    import os
     try:
-        # Clica no botão de download do XML da nota
-        nota["elemento"].click()
-        page.wait_for_timeout(1000)
+        # Clica no botão de download XML da linha
+        btn_xml = nota["linha"].query_selector("a[href*='xml'], button[title*='XML'], a[title*='XML']")
         
-        page.click("text=Download XML")
-        page.wait_for_timeout(2000)
+        if not btn_xml:
+            raise Exception("Botão XML não encontrado")
 
-        # Captura o conteúdo XML
-        xml_content = page.content()
-        return xml_content
+        with page.expect_download() as download_info:
+            btn_xml.click()
+        
+        download = download_info.value
+        caminho = os.path.join(download_dir, f"{nota['numero']}.xml")
+        download.save_as(caminho)
+        
+        with open(caminho, 'r', encoding='utf-8') as f:
+            conteudo = f.read()
+        
+        return conteudo
 
     except Exception as e:
         raise Exception(f"Falha ao baixar XML da nota {nota['numero']}: {str(e)}")
