@@ -79,7 +79,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         # Espera a tabela atualizar ou o loading sumir
         await page.wait_for_timeout(8000)
 
-       # =========================
+        # =========================
         # CAPTURA COM PAGINAÇÃO (Ajustado)
         # =========================
         todas_notas = []
@@ -122,15 +122,11 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
             print(f"Notas capturadas até agora: {len(todas_notas)}")
 
             # --- LÓGICA DE PRÓXIMA PÁGINA (MELHORADA) ---
-            # O portal da NFSe usa uma estrutura específica de paginação. 
-            # Vamos tentar localizar o link que contém o ícone de 'próximo' ou o texto '»'
             botao_proximo = page.locator("ul.pagination li a[rel='next'], ul.pagination li a:has-text('»'), a.page-link[aria-label='Next']").first
             
-            # Verifica se o botão existe
             exists = await botao_proximo.count() > 0
-            
-            # Verifica se o botão não está desabilitado (o pai 'li' costuma ter a classe 'disabled')
             is_disabled = False
+            
             if exists:
                 is_disabled = await botao_proximo.evaluate("""el => {
                     const li = el.closest('li');
@@ -144,13 +140,16 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
             print(f"➡️ Indo para a página {pagina + 1}...")
             await botao_proximo.click()
             
-            # ESPERA CRÍTICA: Aguarda o conteúdo da tabela mudar ou um pequeno delay fixo
-            # para evitar ler a mesma página duas vezes
+            # ESPERA CRÍTICA para carregar novos dados
             await page.wait_for_timeout(7000) 
             pagina += 1
 
         print(f"✅ Total de notas capturadas em todas as páginas: {len(todas_notas)}")
         return todas_notas
+
+    except Exception as e:
+        await page.screenshot(path="/tmp/erro_consulta.png")
+        raise Exception(f"Erro na consulta: {str(e)}")
 
 
 async def baixar_xml(page, nota: dict, download_dir: str):
@@ -171,10 +170,12 @@ async def baixar_xml(page, nota: dict, download_dir: str):
         except:
             # Fallback Fetch
             conteudo = await page.evaluate(f"""async () => {{
-                const r = await fetch('{url}', {{ credentials: 'include' }});
-                return await r.text();
+                try {{
+                    const r = await fetch('{url}', {{ credentials: 'include' }});
+                    return await r.text();
+                }} catch(e) {{ return null; }}
             }}""")
-            if "<?xml" in conteudo:
+            if conteudo and "<?xml" in conteudo:
                 with open(caminho, 'w', encoding='utf-8') as f:
                     f.write(conteudo)
                 return True
