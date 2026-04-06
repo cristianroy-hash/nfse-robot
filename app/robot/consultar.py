@@ -13,9 +13,9 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         data_fim_fmt = dt_fim.strftime("%d/%m/%Y")
         print(f"Datas formatadas: {data_ini_fmt} a {data_fim_fmt}")
 
-        # ==========++===============
+        # =========================
         # ACESSO DIRETO (Fluxo Funcional)
-        # =================++========
+        # =========================
         print("Navegando para o portal de Notas Emitidas...")
         await page.goto(
             "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
@@ -119,54 +119,32 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
             print(f"Notas acumuladas: {len(todas_notas)}")
 
             # =========================
-            # 🔥 NOVA LÓGICA DE PAGINAÇÃO (ROBUSTA)
+            # 🔥 NOVA LÓGICA DEFINITIVA DE PAGINAÇÃO
             # =========================
-            # ALTERAÇÃO: não dependemos mais de número ou símbolo (>, ›, »)
-            # Agora pegamos TODOS os botões da paginação e clicamos no último válido
+            print("Verificando próxima página (via ícone fa-angle-right)...")
 
-            print("Verificando próxima página (modo robusto)...")
+            # 🔥 NOVO: seleciona botão pelo ÍCONE (esse é o pulo do gato)
+            botao_next = page.locator("ul.pagination li a:has(i.fa-angle-right)").first
 
-            botoes = page.locator("ul.pagination li")
-            total_botoes = await botoes.count()
-
-            proximo_encontrado = False
-
-            # percorre de trás pra frente (último botão primeiro)
-            for i in range(total_botoes - 1, -1, -1):
-                li = botoes.nth(i)
-
-                classes = (await li.get_attribute("class") or "").lower()
-
-                # ignora botão desabilitado ou página atual
-                if "disabled" in classes or "active" in classes:
-                    continue
-
-                link = li.locator("a")
-
-                if await link.count() == 0:
-                    continue
-
-                texto = (await link.inner_text()).strip()
-
-                print(f"🔎 Botão candidato: '{texto}' | classes: {classes}")
-
-                # evita clicar em voltar (<< ou «)
-                if texto in ["«", "<<"]:
-                    continue
-
-                print(f"➡️ Clicando no botão: {texto}")
-
-                await link.click()
-                await page.wait_for_timeout(9000)
-
-                pagina += 1
-                proximo_encontrado = True
+            if await botao_next.count() == 0:
+                print("🚫 Botão de próxima (ícone) não encontrado")
                 break
 
-            # se não encontrou nenhum botão válido → fim
-            if not proximo_encontrado:
-                print("🚫 Paginação finalizada (nenhum botão válido encontrado)")
+            # 🔥 NOVO: verifica se está desabilitado
+            is_disabled = await botao_next.evaluate("""el => {
+                const li = el.closest('li');
+                return li && li.classList.contains('disabled');
+            }""")
+
+            if is_disabled:
+                print("🚫 Botão próxima desabilitado")
                 break
+
+            print("➡️ Clicando no botão próxima (ícone)...")
+            await botao_next.click()
+
+            await page.wait_for_timeout(9000)
+            pagina += 1
 
         print(f"✅ Total final de notas: {len(todas_notas)}")
         return todas_notas
