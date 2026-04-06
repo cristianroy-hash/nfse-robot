@@ -136,7 +136,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 target_button = botao_next
 
             # =========================
-            # 🔥 NOVO: FALLBACK FORÇANDO URL (SEM ALTERAR FLUXO ORIGINAL)
+            # 🔥 NOVO: FALLBACK INTELIGENTE (COM REAPLICAÇÃO DE FILTRO)
             # =========================
             if not target_button or await target_button.count() == 0:
                 proxima_pagina = pagina + 1
@@ -145,13 +145,26 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 print(f"➡️ [FALLBACK] Forçando navegação para página {proxima_pagina}")
 
                 await page.goto(url_forcada, wait_until="networkidle")
-                await page.wait_for_timeout(8000)
+                await page.wait_for_timeout(5000)
+
+                # 🔥 NOVO: reaplica filtro (ESSENCIAL)
+                try:
+                    print("🔁 Reaplicando filtro na página forçada...")
+                    await page.fill("#datainicio", data_ini_fmt)
+                    await page.fill("#datafim", data_fim_fmt)
+                    await page.locator("button:has-text('Filtrar')").first.click()
+                    await page.wait_for_timeout(5000)
+                except:
+                    print("⚠️ Falha ao reaplicar filtro (seguindo mesmo assim)")
 
                 check_rows = await page.locator("table tbody tr[data-chave]").count()
 
+                # 🔥 NOVO: valida se realmente acabou
                 if check_rows == 0:
                     print("🚫 Paginação finalizada (sem dados na página forçada)")
                     break
+
+                print(f"✅ Página {proxima_pagina} possui {check_rows} registros")
 
                 pagina = proxima_pagina
                 continue
