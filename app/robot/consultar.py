@@ -83,14 +83,22 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         # 🔥 NOVO: controle de duplicidade
         chaves_vistas = set()
 
+        # 🔥 NOVO: limite de segurança contra loop infinito
+        MAX_PAGINAS = 50
+
         while True:
             print(f"📄 Lendo página {pagina}...")
 
+            # 🔥 NOVO: fail-safe
+            if pagina > MAX_PAGINAS:
+                print("🚫 Paginação interrompida (limite de segurança atingido)")
+                break
+
             await page.wait_for_selector("body", timeout=15000)
 
-            # 🔥 NOVO: parar se portal indicar vazio
+            # 🔥 NOVO: valida página vazia (MAIS ROBUSTO)
             texto_pagina = await page.content()
-            if "Nenhum registro encontrado" in texto_pagina:
+            if "Nenhum registro encontrado" in texto_pagina or "Nenhum registro" in texto_pagina:
                 print("🚫 Paginação finalizada (mensagem do portal)")
                 break
 
@@ -122,7 +130,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 print("Nenhuma nota encontrada nesta página.")
                 break
 
-            # 🔥 NOVO: evita duplicação (BUG REAL DO PORTAL)
+            # 🔥 NOVO: evita duplicação (BUG DO PORTAL)
             novas_notas = []
             for nota in notas_raw:
                 chave = nota.get("chave_acesso") or nota.get("data_chave")
@@ -130,6 +138,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                     chaves_vistas.add(chave)
                     novas_notas.append(nota)
 
+            # 🔥 NOVO: parada se só vier duplicado
             if not novas_notas:
                 print("🚫 Paginação finalizada (dados duplicados detectados)")
                 break
@@ -170,9 +179,9 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 await page.goto(url_forcada, wait_until="networkidle")
                 await page.wait_for_timeout(5000)
 
-                # 🔥 NOVO: parar se página vazia (CORREÇÃO PRINCIPAL)
+                # 🔥 NOVO: valida vazio no fallback
                 texto_forcado = await page.content()
-                if "Nenhum registro encontrado" in texto_forcado:
+                if "Nenhum registro encontrado" in texto_forcado or "Nenhum registro" in texto_forcado:
                     print("🚫 Paginação finalizada (fallback sem registros)")
                     break
 
