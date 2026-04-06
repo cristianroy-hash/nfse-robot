@@ -121,27 +121,33 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
             todas_notas.extend(notas_raw)
             print(f"Notas capturadas até agora: {len(todas_notas)}")
 
-            # --- LÓGICA DE PRÓXIMA PÁGINA (MELHORADA) ---
-            botao_proximo = page.locator("ul.pagination li a[rel='next'], ul.pagination li a:has-text('»'), a.page-link[aria-label='Next']").first
+            # --- LÓGICA DE PRÓXIMA PÁGINA (Ajuste Final) ---
+            print("Verificando se existe próxima página...")
             
-            exists = await botao_proximo.count() > 0
+            # Tenta encontrar o botão que leva para a próxima página
+            # O seletor 'li:has(a[rel="next"])' foca no item da lista que contém o link de próxima
+            proximo_item_lista = page.locator("ul.pagination li").filter(has=page.locator("a:has-text('»'), a[rel='next']")).first
+            
+            exists = await proximo_item_lista.count() > 0
+            
+            # Verifica se o item da lista tem a classe 'disabled'
             is_disabled = False
-            
             if exists:
-                is_disabled = await botao_proximo.evaluate("""el => {
-                    const li = el.closest('li');
-                    return li ? li.classList.contains('disabled') : el.hasAttribute('disabled');
-                }""")
+                is_disabled = await proximo_item_lista.evaluate("el => el.classList.contains('disabled')")
 
             if not exists or is_disabled:
                 print(f"🚫 Fim da paginação alcançado na página {pagina}.")
                 break
 
+            # Se chegou aqui, o botão existe e não está desabilitado
             print(f"➡️ Indo para a página {pagina + 1}...")
-            await botao_proximo.click()
             
-            # ESPERA CRÍTICA para carregar novos dados
-            await page.wait_for_timeout(7000) 
+            # Clica no link dentro da LI
+            await proximo_item_lista.locator("a").click()
+            
+            # ESPERA CRÍTICA: Aguarda a tabela "piscar" ou recarregar
+            # Vamos esperar o sumiço de qualquer overlay de loading ou apenas um tempo maior
+            await page.wait_for_timeout(8000) 
             pagina += 1
 
         print(f"✅ Total de notas capturadas em todas as páginas: {len(todas_notas)}")
