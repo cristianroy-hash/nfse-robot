@@ -79,14 +79,17 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         # Espera a tabela atualizar ou o loading sumir
         await page.wait_for_timeout(8000)
 
-        # =========================
-        # CAPTURA COM PAGINAÇÃO
+       # =========================
+        # CAPTURA COM PAGINAÇÃO (Ajustado)
         # =========================
         todas_notas = []
         pagina = 1
 
         while True:
             print(f"📄 Lendo página {pagina}...")
+            
+            # Aguarda a tabela de notas estar presente
+            await page.wait_for_selector("table tbody tr[data-chave]", timeout=10000)
             
             # Captura notas da página atual
             notas_raw = await page.evaluate("""() => {
@@ -116,32 +119,38 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 break
 
             todas_notas.extend(notas_raw)
-            print(f"Notas capturadas: {len(todas_notas)}")
+            print(f"Notas capturadas até agora: {len(todas_notas)}")
 
-            # --- LÓGICA DE PRÓXIMA PÁGINA ---
-            botao_proximo = page.locator("a[rel='next'], button:has-text('Próxima')")
+            # --- LÓGICA DE PRÓXIMA PÁGINA (MELHORADA) ---
+            # O portal da NFSe usa uma estrutura específica de paginação. 
+            # Vamos tentar localizar o link que contém o ícone de 'próximo' ou o texto '»'
+            botao_proximo = page.locator("ul.pagination li a[rel='next'], ul.pagination li a:has-text('»'), a.page-link[aria-label='Next']").first
             
-            if await botao_proximo.count() == 0:
-                break
+            # Verifica se o botão existe
+            exists = await botao_proximo.count() > 0
             
-            # Verifica se o botão está desabilitado
-            is_disabled = await botao_proximo.first.evaluate("el => el.classList.contains('disabled') || el.hasAttribute('disabled')")
-            if is_disabled:
-                print("🚫 Fim da paginação (botão desabilitado).")
+            # Verifica se o botão não está desabilitado (o pai 'li' costuma ter a classe 'disabled')
+            is_disabled = False
+            if exists:
+                is_disabled = await botao_proximo.evaluate("""el => {
+                    const li = el.closest('li');
+                    return li ? li.classList.contains('disabled') : el.hasAttribute('disabled');
+                }""")
+
+            if not exists or is_disabled:
+                print(f"🚫 Fim da paginação alcançado na página {pagina}.")
                 break
 
-            print("Avançando página...")
-            await botao_proximo.first.click()
-            await page.wait_for_timeout(6000)
+            print(f"➡️ Indo para a página {pagina + 1}...")
+            await botao_proximo.click()
+            
+            # ESPERA CRÍTICA: Aguarda o conteúdo da tabela mudar ou um pequeno delay fixo
+            # para evitar ler a mesma página duas vezes
+            await page.wait_for_timeout(7000) 
             pagina += 1
 
-        print(f"✅ Total de notas capturadas: {len(todas_notas)}")
+        print(f"✅ Total de notas capturadas em todas as páginas: {len(todas_notas)}")
         return todas_notas
-
-    except Exception as e:
-        print(f"❌ Erro detectado: {str(e)}")
-        await page.screenshot(path="/tmp/erro_consulta.png")
-        raise Exception(f"Erro na consulta: {str(e)}")
 
 
 async def baixar_xml(page, nota: dict, download_dir: str):
