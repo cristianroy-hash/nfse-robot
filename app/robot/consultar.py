@@ -7,116 +7,89 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
     try:
         print(f"Período: {data_inicio} a {data_fim}")
 
+        # Converte formato YYYY-MM-DD para DD/MM/YYYY que o portal espera
         dt_ini = datetime.strptime(data_inicio, "%Y-%m-%d")
         dt_fim = datetime.strptime(data_fim, "%Y-%m-%d")
         data_ini_fmt = dt_ini.strftime("%d/%m/%Y")
         data_fim_fmt = dt_fim.strftime("%d/%m/%Y")
+        print(f"Datas formatadas: {data_ini_fmt} a {data_fim_fmt}")
 
         # =========================
-        # LOGIN VIA CERTIFICADO (Ajustado)
+        # ACESSO DIRETO (Fluxo Funcional)
         # =========================
-        print("Acessando endpoint de autenticação por certificado...")
-        
-        # 1. Tenta o acesso direto ao gatilho de certificado
-        await page.goto(
-            "https://www.nfse.gov.br/EmissorNacional/Login/Certificado",
-            wait_until="networkidle",
-            timeout=60000
-        )
-
-        await page.wait_for_timeout(5000)
-        print(f"URL após tentativa de login: {page.url}")
-
-        # 2. Verifica se o Dashboard carregou (procurando um elemento comum de usuário logado)
-        # Se não encontrar o menu ou navbar, tenta forçar o clique no botão
-        if "Login" in page.url or await page.locator(".navbar").count() == 0:
-            print("Sessão não entrou direto, tentando forçar clique no botão Certificado...")
-            
-            # Localiza o botão de certificado (pode aparecer na tela principal de login)
-            btn_cert = page.locator("a[href*='Login/Certificado'], button:has-text('Certificado')").first
-            
-            if await btn_cert.count() > 0:
-                await btn_cert.click()
-                # Espera extra para o portal processar o certificado digital
-                await page.wait_for_timeout(8000) 
-            else:
-                # Se não houver botão e estiver no login, tenta ir para a Home para ver se o cookie "pegou"
-                await page.goto("https://www.nfse.gov.br/EmissorNacional/", wait_until="domcontentloaded")
-
-        # VALIDAÇÃO FINAL
-        # Se após as tentativas ainda estiver na tela de login, interrompe
-        if "Login" in page.url:
-            await page.screenshot(path="/tmp/erro_login_detalhado.png")
-            raise Exception("❌ Sessão não autenticada via Certificado")
-
-        print("✅ Autenticação confirmada!")
-
-        # =========================
-        # IR PARA NOTAS
-        # =========================
+        # Navega direto para a página de notas emitidas
         await page.goto(
             "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
             wait_until="networkidle",
             timeout=60000
         )
-
         await page.wait_for_timeout(3000)
 
-        print("📅 Preenchendo datas...")
-
+        # Preenche data inicial usando ID descoberto via diagnóstico
+        print("Preenchendo data inicial...")
         campo_ini = page.locator("#datainicio")
         await campo_ini.click()
         await page.keyboard.press("Control+A")
-        await page.keyboard.press("Backspace") # Garante limpeza total
-        await page.keyboard.type(data_ini_fmt, delay=100)
+        await page.keyboard.type(data_ini_fmt, delay=80)
         await page.keyboard.press("Tab")
+        await page.wait_for_timeout(500)
 
-        await page.wait_for_timeout(800)
-
+        # Preenche data final usando ID descoberto via diagnóstico
+        print("Preenchendo data final...")
         campo_fim = page.locator("#datafim")
         await campo_fim.click()
         await page.keyboard.press("Control+A")
-        await page.keyboard.press("Backspace")
-        await page.keyboard.type(data_fim_fmt, delay=100)
+        await page.keyboard.type(data_fim_fmt, delay=80)
         await page.keyboard.press("Tab")
+        await page.wait_for_timeout(500)
 
-        await page.wait_for_timeout(800)
-
+        # Verifica se os valores foram preenchidos corretamente
         val_ini = await campo_ini.input_value()
         val_fim = await campo_fim.input_value()
+        print(f"Valores nos campos: {val_ini} a {val_fim}")
 
-        print(f"Valores nos campos: {val_ini} até {val_fim}")
-
-        print("🔍 Filtrando...")
-        await page.locator("button:has-text('Filtrar')").first.click(force=True)
-
-        # Tempo maior para o portal processar a consulta
-        await page.wait_for_timeout(8000)
+        # Clica no botão Filtrar para aplicar o período
+        print("Clicando em Filtrar...")
+        await page.locator("button:has-text('Filtrar')").first.click()
+        await page.wait_for_timeout(6000)
 
         # =========================
-        # PAGINAÇÃO
+        # CAPTURA COM PAGINAÇÃO
         # =========================
         todas_notas = []
         pagina = 1
 
         while True:
             print(f"📄 Lendo página {pagina}...")
-
+            
+            # Captura notas usando data-chave descoberto no diagnóstico do HTML
             notas_raw = await page.evaluate("""() => {
                 const rows = document.querySelectorAll('table tbody tr[data-chave]');
                 return Array.from(rows).map(row => {
                     const chaveEncoded = row.getAttribute('data-chave');
+                    const situacao = row.getAttribute('data-situacao') || '';
+                    const valor = row.getAttribute('data-valor') || '';
+
+                    // Captura data de geração da coluna td-data
+                    const tdData = row.querySelector('.td-data');
+                    const data = tdData ? tdData.innerText.trim() : '';
+
+                    // Captura nome do tomador da coluna td-texto-grande
+                    const tdTomador = row.querySelector('.td-texto-grande');
+                    const tomador = tdTomador ? tdTomador.innerText.trim().substring(0, 60) : '';
+
+                    // Busca chave numérica de 44+ dígitos no HTML da linha
                     const htmlRow = row.innerHTML;
-                    const matchChave = htmlRow.match(/Download\\/NFSe\\/([0-9]{40,60})/);
+                    const matchChave = htmlRow.match(/Download\/NFSe\/([0-9]{40,60})/);
                     const chaveNumerica = matchChave ? matchChave[1] : null;
 
                     return {
                         data_chave: chaveEncoded,
                         chave_acesso: chaveNumerica,
-                        situacao: row.getAttribute('data-situacao') || '',
-                        valor: row.getAttribute('data-valor') || '',
-                        data: row.querySelector('.td-data')?.innerText.trim() || '',
-                        tomador: row.querySelector('.td-texto-grande')?.innerText.trim().substring(0, 60) || '',
+                        situacao: situacao,
+                        valor: valor,
+                        data: data,
+                        tomador: tomador,
                         url_download: chaveNumerica
                             ? 'https://www.nfse.gov.br/EmissorNacional/Notas/Download/NFSe/' + chaveNumerica
                             : null
@@ -124,38 +97,34 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 });
             }""")
 
-            print(f"Notas nesta página: {len(notas_raw)}")
-
             if not notas_raw:
+                print("Nenhuma nota encontrada nesta página.")
                 break
 
             todas_notas.extend(notas_raw)
+            print(f"Notas encontradas até agora: {len(todas_notas)}")
 
-            # tenta próxima página
+            # --- LÓGICA DE PRÓXIMA PÁGINA ---
             botao_proximo = page.locator("a[rel='next'], button:has-text('Próxima')")
-
+            
+            # Se o botão não existir ou estiver desabilitado, encerra o loop
             if await botao_proximo.count() == 0:
-                print("🚫 Sem paginação")
+                break
+            
+            is_disabled = await botao_proximo.first.evaluate("el => el.classList.contains('disabled') || el.hasAttribute('disabled')")
+            if is_disabled:
                 break
 
-            try:
-                # Verifica se o botão não está desabilitado (classe 'disabled' comum em paginação)
-                is_disabled = await botao_proximo.first.evaluate("el => el.classList.contains('disabled') || el.getAttribute('disabled')")
-                if is_disabled:
-                    print("🚫 Botão próxima desabilitado")
-                    break
-                
-                await botao_proximo.first.click()
-                await page.wait_for_timeout(6000)
-                pagina += 1
-            except:
-                print("🚫 Fim da paginação ou erro ao clicar")
-                break
+            print("Avançando para a próxima página...")
+            await botao_proximo.first.click()
+            await page.wait_for_timeout(5000)
+            pagina += 1
 
         print(f"✅ Total de notas capturadas: {len(todas_notas)}")
         return todas_notas
 
     except Exception as e:
+        # Salva screenshot para debug em caso de erro
         await page.screenshot(path="/tmp/erro_consulta.png")
         raise Exception(f"Erro na consulta: {str(e)}")
 
@@ -163,38 +132,45 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
 async def baixar_xml(page, nota: dict, download_dir: str):
     try:
         url = nota.get("url_download")
-        chave = nota.get("chave_acesso") or nota.get("data_chave", "nota")
-
+        chave = nota.get("chave_acesso") or nota.get("data_chave", "desconhecido")
+        nome_arquivo = nota.get("chave_acesso") or nota.get("data_chave", "nota")
+        
         if not url:
+            print("Sem URL de download")
             return False
 
-        caminho = os.path.join(download_dir, f"{chave}.xml")
+        caminho = os.path.join(download_dir, f"{nome_arquivo}.xml")
 
+        # Tentativa 1: Download Nativo do Playwright (Assíncrono)
         try:
             async with page.expect_download(timeout=30000) as download_info:
                 await page.evaluate(f"window.open('{url}', '_blank')")
-
+            
             download = await download_info.value
             await download.save_as(caminho)
-
-            print(f"📥 XML salvo: {caminho}")
+            print(f"XML salvo: {caminho}")
             return True
 
-        except:
+        except Exception as e:
+            print(f"Erro no download nativo: {str(e)}. Tentando via Fetch...")
+            
+            # Fallback: tenta via fetch com cookies da sessão atual
             conteudo = await page.evaluate(f"""async () => {{
-                const r = await fetch('{url}', {{ credentials: 'include' }});
+                const r = await fetch('{url}', {{
+                    credentials: 'include',
+                    headers: {{ 'Accept': 'application/xml, text/xml, */*' }}
+                }});
                 return await r.text();
             }}""")
 
-            if "<?xml" in conteudo:
+            if conteudo and "<?xml" in conteudo:
                 with open(caminho, 'w', encoding='utf-8') as f:
                     f.write(conteudo)
-
-                print(f"📥 XML via fetch: {caminho}")
+                print(f"XML salvo via fetch: {caminho}")
                 return True
-
+        
         return False
 
     except Exception as e:
-        print(f"Erro download: {str(e)}")
+        print(f"Erro ao baixar nota {chave}: {str(e)}")
         return False
