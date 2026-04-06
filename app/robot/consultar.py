@@ -80,7 +80,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         await page.wait_for_timeout(8000)
 
         # =========================
-        # CAPTURA COM PAGINAÇÃO (Ajustado)
+        # CAPTURA COM PAGINAÇÃO (Ajuste Cirúrgico)
         # =========================
         todas_notas = []
         pagina = 1
@@ -88,10 +88,10 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         while True:
             print(f"📄 Lendo página {pagina}...")
             
-            # Aguarda a tabela de notas estar presente
-            await page.wait_for_selector("table tbody tr[data-chave]", timeout=10000)
+            # Garante que as notas da página atual carregaram antes de ler
+            await page.wait_for_selector("table tbody tr[data-chave]", timeout=15000)
             
-            # Captura notas da página atual
+            # Captura notas da página atual (Mantendo sua lógica original)
             notas_raw = await page.evaluate("""() => {
                 const rows = document.querySelectorAll('table tbody tr[data-chave]');
                 return Array.from(rows).map(row => {
@@ -121,33 +121,45 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
             todas_notas.extend(notas_raw)
             print(f"Notas capturadas até agora: {len(todas_notas)}")
 
-            # --- LÓGICA DE PRÓXIMA PÁGINA (Ajuste Final) ---
-            print("Verificando se existe próxima página...")
+            # --- LÓGICA DE PRÓXIMA PÁGINA (Nova tentativa) ---
+            print("Verificando botões de paginação...")
             
-            # Tenta encontrar o botão que leva para a próxima página
-            # O seletor 'li:has(a[rel="next"])' foca no item da lista que contém o link de próxima
-            proximo_item_lista = page.locator("ul.pagination li").filter(has=page.locator("a:has-text('»'), a[rel='next']")).first
-            
-            exists = await proximo_item_lista.count() > 0
-            
-            # Verifica se o item da lista tem a classe 'disabled'
+            # O portal muitas vezes usa o símbolo » para o botão 'Próximo' ou 'Último'
+            # Vamos buscar especificamente o link que NÃO seja o último (») e sim o 'Próximo' (>) ou 'Next'
+            # Ou simplesmente clicar no número da página seguinte (pagina + 1)
+            proxima_pagina_num = str(pagina + 1)
+            botao_num = page.locator(f"ul.pagination li a:text-is('{proxima_pagina_num}')").first
+            botao_seta = page.locator("ul.pagination li a[rel='next'], ul.pagination li a:has-text('›')").first
+
+            if await botao_num.count() > 0:
+                target_button = botao_num
+                print(f"Encontrado botão para página {proxima_pagina_num}")
+            elif await botao_seta.count() > 0:
+                target_button = botao_seta
+                print("Encontrada seta 'Próximo'")
+            else:
+                target_button = None
+
+            # Verifica se o botão existe e se NÃO está desabilitado
+            exists = target_button and await target_button.count() > 0
             is_disabled = False
+            
             if exists:
-                is_disabled = await proximo_item_lista.evaluate("el => el.classList.contains('disabled')")
+                # Checa se o 'li' pai tem a classe 'disabled'
+                is_disabled = await target_button.evaluate("""el => {
+                    const li = el.closest('li');
+                    return li ? (li.classList.contains('disabled') || li.classList.contains('active')) : false;
+                }""")
 
             if not exists or is_disabled:
-                print(f"🚫 Fim da paginação alcançado na página {pagina}.")
+                print(f"🚫 Fim da paginação (Botão não existe ou está desativado) na página {pagina}.")
                 break
 
-            # Se chegou aqui, o botão existe e não está desabilitado
-            print(f"➡️ Indo para a página {pagina + 1}...")
+            print(f"➡️ Clicando para ir para a página {pagina + 1}...")
+            await target_button.click()
             
-            # Clica no link dentro da LI
-            await proximo_item_lista.locator("a").click()
-            
-            # ESPERA CRÍTICA: Aguarda a tabela "piscar" ou recarregar
-            # Vamos esperar o sumiço de qualquer overlay de loading ou apenas um tempo maior
-            await page.wait_for_timeout(8000) 
+            # ESPERA CRÍTICA: Aguarda a tabela atualizar (importante ser longo)
+            await page.wait_for_timeout(9000) 
             pagina += 1
 
         print(f"✅ Total de notas capturadas em todas as páginas: {len(todas_notas)}")
