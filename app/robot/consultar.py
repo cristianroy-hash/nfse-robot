@@ -6,16 +6,12 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
     try:
         print(f"Período: {data_inicio} a {data_fim}")
 
-        # Converte formato YYYY-MM-DD para DD/MM/YYYY que o portal espera
         dt_ini = datetime.strptime(data_inicio, "%Y-%m-%d")
         dt_fim = datetime.strptime(data_fim, "%Y-%m-%d")
         data_ini_fmt = dt_ini.strftime("%d/%m/%Y")
         data_fim_fmt = dt_fim.strftime("%d/%m/%Y")
         print(f"Datas formatadas: {data_ini_fmt} a {data_fim_fmt}")
 
-        # =========================
-        # ACESSO DIRETO (Fluxo Funcional)
-        # =========================
         print("Navegando para o portal de Notas Emitidas...")
         await page.goto(
             "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
@@ -119,31 +115,60 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
             print(f"Notas acumuladas: {len(todas_notas)}")
 
             # =========================
-            # 🔥 NOVA LÓGICA DEFINITIVA DE PAGINAÇÃO
+            # DETECÇÃO UNIVERSAL DE PRÓXIMA PÁGINA
             # =========================
-            print("Verificando próxima página (via ícone fa-angle-right)...")
+            print("Verificando próxima página...")
 
-            # 🔥 NOVO: seleciona botão pelo ÍCONE (esse é o pulo do gato)
-            botao_next = page.locator("ul.pagination li a:has(i.fa-angle-right)").first
+            proxima_num = str(pagina + 1)
+            botao_num = page.locator(f"ul.pagination li a:text-is('{proxima_num}')").first
 
-            if await botao_next.count() == 0:
-                print("🚫 Botão de próxima (ícone) não encontrado")
-                break
+            botao_next = page.locator(
+                "ul.pagination li a[rel='next'], ul.pagination li a:has-text('>'), ul.pagination li a:has-text('›'), ul.pagination li a:has-text('»')"
+            ).first
 
-            # 🔥 NOVO: verifica se está desabilitado
-            is_disabled = await botao_next.evaluate("""el => {
+            target_button = None
+
+            if await botao_num.count() > 0:
+                print(f"➡️ Indo para página {proxima_num}")
+                target_button = botao_num
+            elif await botao_next.count() > 0:
+                print("➡️ Indo para próxima via botão '>'")
+                target_button = botao_next
+
+            # =========================
+            # 🔥 NOVO: FALLBACK FORÇANDO URL (SEM ALTERAR FLUXO ORIGINAL)
+            # =========================
+            if not target_button or await target_button.count() == 0:
+                proxima_pagina = pagina + 1
+                url_forcada = f"https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas?pg={proxima_pagina}"
+
+                print(f"➡️ [FALLBACK] Forçando navegação para página {proxima_pagina}")
+
+                await page.goto(url_forcada, wait_until="networkidle")
+                await page.wait_for_timeout(8000)
+
+                check_rows = await page.locator("table tbody tr[data-chave]").count()
+
+                if check_rows == 0:
+                    print("🚫 Paginação finalizada (sem dados na página forçada)")
+                    break
+
+                pagina = proxima_pagina
+                continue
+
+            # fluxo original mantido
+            is_disabled = await target_button.evaluate("""el => {
                 const li = el.closest('li');
                 return li && li.classList.contains('disabled');
             }""")
 
             if is_disabled:
-                print("🚫 Botão próxima desabilitado")
+                print("🚫 Botão próximo desabilitado")
                 break
 
-            print("➡️ Clicando no botão próxima (ícone)...")
-            await botao_next.click()
-
+            await target_button.click()
             await page.wait_for_timeout(9000)
+
             pagina += 1
 
         print(f"✅ Total final de notas: {len(todas_notas)}")
@@ -173,7 +198,6 @@ async def baixar_xml(page, nota: dict, download_dir: str):
             return True
 
         except:
-            # fallback via fetch
             conteudo = await page.evaluate(f"""async () => {{
                 try {{
                     const r = await fetch('{url}', {{ credentials: 'include' }});
