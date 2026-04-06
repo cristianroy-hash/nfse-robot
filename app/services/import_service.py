@@ -26,6 +26,9 @@ def salvar_no_supabase(client_id: str, periodo: str, numero: str, caminho_local:
             file_options={"content-type": "application/xml", "upsert": "true"}
         )
 
+        # ADICIONE ESTA LINHA PARA GERAR A URL PÚBLICA
+        url_publica = supabase.storage.from_("invoices").get_public_url(caminho_storage)
+
         print(f"Salvo no Supabase: {caminho_storage}")
         return caminho_storage
 
@@ -91,12 +94,16 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
                         caminho_local = os.path.join(tmp_dir, nome_arquivo)
 
                         if SUPABASE_URL and SUPABASE_KEY:
-                            salvar_no_supabase(
+                            # CAPTURE A URL RETORNADA AQUI
+                            nova_url = salvar_no_supabase(                    
                                 payload["cliente_id"],
                                 periodo_str,
                                 nome_arquivo.replace(".xml", ""),
                                 caminho_local
                             )
+                            # ATUALIZE A URL NA NOTA PARA O HTML USAR
+                            if nova_url:
+                                nota["url_download"] = nova_url
 
                         os.remove(caminho_local)
 
@@ -107,6 +114,8 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
                 print(f"Erro na nota: {str(e)}")
                 continue
 
+        # ESTA LINHA É CRÍTICA: Envie a lista preenchida para o Job
+        jobs[job_id]["notas"] = notas
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["message"] = f"{xmls_baixados} notas importadas"
 
@@ -135,3 +144,5 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
 
         except Exception as e:
             print(f"Erro limpeza: {str(e)}")
+
+
