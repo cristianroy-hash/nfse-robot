@@ -80,8 +80,19 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         todas_notas = []
         pagina = 1
 
+        # 🔥 NOVO: controle de duplicidade
+        chaves_vistas = set()
+
         while True:
             print(f"📄 Lendo página {pagina}...")
+
+            await page.wait_for_selector("body", timeout=15000)
+
+            # 🔥 NOVO: parar se portal indicar vazio
+            texto_pagina = await page.content()
+            if "Nenhum registro encontrado" in texto_pagina:
+                print("🚫 Paginação finalizada (mensagem do portal)")
+                break
 
             await page.wait_for_selector("table tbody tr[data-chave]", timeout=15000)
 
@@ -111,7 +122,19 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 print("Nenhuma nota encontrada nesta página.")
                 break
 
-            todas_notas.extend(notas_raw)
+            # 🔥 NOVO: evita duplicação (BUG REAL DO PORTAL)
+            novas_notas = []
+            for nota in notas_raw:
+                chave = nota.get("chave_acesso") or nota.get("data_chave")
+                if chave not in chaves_vistas:
+                    chaves_vistas.add(chave)
+                    novas_notas.append(nota)
+
+            if not novas_notas:
+                print("🚫 Paginação finalizada (dados duplicados detectados)")
+                break
+
+            todas_notas.extend(novas_notas)
             print(f"Notas acumuladas: {len(todas_notas)}")
 
             # =========================
@@ -136,35 +159,22 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 target_button = botao_next
 
             # =========================
-            # 🔥 NOVO: FALLBACK INTELIGENTE (COM REAPLICAÇÃO DE FILTRO)
+            # 🔥 NOVO: FALLBACK INTELIGENTE
             # =========================
             if not target_button or await target_button.count() == 0:
                 proxima_pagina = pagina + 1
-                url_forcada = f"https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas?pg={proxima_pagina}"
+                url_forcada = f"https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas?pg={proxima_pagina}&datainicio={data_ini_fmt}&datafim={data_fim_fmt}"
 
                 print(f"➡️ [FALLBACK] Forçando navegação para página {proxima_pagina}")
 
                 await page.goto(url_forcada, wait_until="networkidle")
                 await page.wait_for_timeout(5000)
 
-                # 🔥 NOVO: reaplica filtro (ESSENCIAL)
-                try:
-                    print("🔁 Reaplicando filtro na página forçada...")
-                    await page.fill("#datainicio", data_ini_fmt)
-                    await page.fill("#datafim", data_fim_fmt)
-                    await page.locator("button:has-text('Filtrar')").first.click()
-                    await page.wait_for_timeout(5000)
-                except:
-                    print("⚠️ Falha ao reaplicar filtro (seguindo mesmo assim)")
-
-                check_rows = await page.locator("table tbody tr[data-chave]").count()
-
-                # 🔥 NOVO: valida se realmente acabou
-                if check_rows == 0:
-                    print("🚫 Paginação finalizada (sem dados na página forçada)")
+                # 🔥 NOVO: parar se página vazia (CORREÇÃO PRINCIPAL)
+                texto_forcado = await page.content()
+                if "Nenhum registro encontrado" in texto_forcado:
+                    print("🚫 Paginação finalizada (fallback sem registros)")
                     break
-
-                print(f"✅ Página {proxima_pagina} possui {check_rows} registros")
 
                 pagina = proxima_pagina
                 continue
