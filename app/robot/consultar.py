@@ -13,9 +13,9 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         data_fim_fmt = dt_fim.strftime("%d/%m/%Y")
         print(f"Datas formatadas: {data_ini_fmt} a {data_fim_fmt}")
 
-        # =========================
+        # ==========++===============
         # ACESSO DIRETO (Fluxo Funcional)
-        # =========================
+        # =================++========
         print("Navegando para o portal de Notas Emitidas...")
         await page.goto(
             "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
