@@ -93,6 +93,12 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
                     for nome_arquivo in arquivos:
                         caminho_local = os.path.join(tmp_dir, nome_arquivo)
 
+                        # --- INÍCIO DA ADIÇÃO ---
+                        # Lemos o texto do XML para enviar direto ao HTML (resolve o problema do ZIP vazio)
+                        with open(caminho_local, "r", encoding="utf-8") as f:
+                        nota["conteudo_xml"] = f.read()  # NOVO: Guarda o texto do XML na nota
+                        # --- FIM DA ADIÇÃO ---
+
                         if SUPABASE_URL and SUPABASE_KEY:
                             # CAPTURE A URL RETORNADA AQUI
                             nova_url = salvar_no_supabase(                    
