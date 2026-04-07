@@ -140,7 +140,8 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                     # 🔥 NOVO: Captura de conteúdo para alimentar o ZIP e PDF no dashboard
                     print(f"📥 Capturando arquivos da nota {chave}...")
                     nota["conteudo_xml"] = await capturar_texto_xml_silencioso(page, nota["url_download_xml"])
-                    nota["conteudo_pdf_base64"] = await capturar_pdf_base64_silencioso(page, nota["url_download_pdf"])
+                    # 🔥 NOVO: Captura via clique para evitar erro 404 de sessão
+                    nota["conteudo_pdf_base64"] = await capturar_pdf_clicando(page, chave)
                     
                     novas_notas.append(nota)
 
@@ -271,14 +272,23 @@ async def capturar_texto_xml_silencioso(page, url):
         }}""")
     except: return None
 
-async def capturar_pdf_base64_silencioso(page, url):
-    """ NOVO: Gera Base64 do PDF a partir da visualização da nota """
-    if not url: return None
+async def capturar_pdf_clicando(page, chave_acesso):
+    """ NOVO: Captura PDF via clique real na tabela para evitar erro 404 de sessão """
     try:
-        new_page = await page.context.new_page()
-        await new_page.goto(url, wait_until="networkidle")
-        await new_page.wait_for_timeout(2000)
-        pdf_bytes = await new_page.pdf(format="A4", print_background=True)
-        await new_page.close()
-        return base64.b64encode(pdf_bytes).decode('utf-8')
-    except: return None
+        btn_visualizar = page.locator(f"a[href*='/Visualizar/{chave_acesso}']").first
+        
+        if await btn_visualizar.count() > 0:
+            async with page.context.expect_page() as new_page_info:
+                await btn_visualizar.click()
+            
+            new_page = await new_page_info.value
+            await new_page.wait_for_load_state("networkidle")
+            await new_page.wait_for_timeout(2000)
+            
+            pdf_bytes = await new_page.pdf(format="A4", print_background=True)
+            await new_page.close()
+            
+            return base64.b64encode(pdf_bytes).decode('utf-8')
+    except:
+        pass
+    return None
