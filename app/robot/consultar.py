@@ -232,7 +232,7 @@ async def baixar_xml(page, nota: dict, download_dir: str):
 
 
 # =========================
-# NOVO: DOWNLOAD DE PDF VIA PORTAL
+# DOWNLOAD DE PDF VIA PORTAL
 # Tenta obter o PDF oficial do portal usando o mesmo mecanismo
 # robusto do baixar_xml (expect_download + fallback fetch).
 # A URL do PDF segue o padrão do portal substituindo o tipo do arquivo.
@@ -252,14 +252,13 @@ async def baixar_pdf(page, nota: dict, download_dir: str):
         if not url_xml or not chave:
             return False
 
-        # NOVO: monta URL do PDF trocando o segmento do endpoint
-        # O portal usa /Download/NFSe/<chave> para XML
-        # e /Download/NFSePDF/<chave> para PDF (padrão observado no portal)
+        # Monta URL do PDF trocando o segmento do endpoint
+        # AJUSTE: Mapeamento de rota do portal para PDF oficial
         url_pdf = url_xml.replace("/Download/NFSe/", "/Download/NFSePDF/")
 
         caminho = os.path.join(download_dir, f"{chave}.pdf")
 
-        # NOVO: tentativa 1 — expect_download (método mais confiável, igual ao XML)
+        # Tentativa 1 — expect_download (método mais confiável, igual ao XML)
         try:
             async with page.expect_download(timeout=30000) as download_info:
                 await page.evaluate(f"window.open('{url_pdf}', '_blank')")
@@ -270,13 +269,13 @@ async def baixar_pdf(page, nota: dict, download_dir: str):
         except Exception as e1:
             print(f"⚠️ Download direto falhou ({e1}), tentando fetch...")
 
-        # NOVO: tentativa 2 — fetch com credentials (fallback, retorna bytes binários)
+        # Tentativa 2 — fetch com credentials (fallback, retorna bytes binários)
         conteudo_b64 = await page.evaluate(f"""async () => {{
             try {{
                 const r = await fetch('{url_pdf}', {{ credentials: 'include' }});
                 if (!r.ok) return null;
                 const ct = r.headers.get('content-type') || '';
-                // NOVO: aceita PDF ou octet-stream (alguns portais enviam assim)
+                // Aceita PDF ou octet-stream (comum em fluxos de download)
                 if (!ct.includes('pdf') && !ct.includes('octet-stream')) return null;
                 const buf = await r.arrayBuffer();
                 const bytes = new Uint8Array(buf);
@@ -288,7 +287,7 @@ async def baixar_pdf(page, nota: dict, download_dir: str):
 
         if conteudo_b64:
             dados = base64.b64decode(conteudo_b64)
-            # NOVO: valida assinatura do PDF antes de salvar (%PDF-)
+            # Valida assinatura do PDF antes de salvar (%PDF-)
             if dados[:4] == b'%PDF':
                 with open(caminho, 'wb') as f:
                     f.write(dados)
@@ -306,7 +305,7 @@ async def baixar_pdf(page, nota: dict, download_dir: str):
 
 
 # =========================
-# NOVO: DOWNLOAD EM LOTE — XML (ZIP)
+# DOWNLOAD EM LOTE — XML (ZIP)
 # Itera sobre a lista de notas e salva todos os XMLs
 # em um diretório, retornando contadores de sucesso/falha.
 # =========================
@@ -333,7 +332,7 @@ async def baixar_lote_xml(page, notas: list, download_dir: str):
 
 
 # =========================
-# NOVO: DOWNLOAD EM LOTE — PDF (ZIP)
+# DOWNLOAD EM LOTE — PDF (ZIP)
 # Itera sobre a lista de notas e salva todos os PDFs
 # em um diretório, retornando contadores de sucesso/falha.
 # =========================
