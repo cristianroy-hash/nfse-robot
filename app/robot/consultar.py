@@ -130,6 +130,14 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 chave = nota.get("chave_acesso") or nota.get("data_chave")
                 if chave not in chaves_vistas:
                     chaves_vistas.add(chave)
+                    # NOVO: monta URL do DANFSe oficial via portal público
+                    # O data_chave já capturado na listagem é o token que o portal público usa
+                    # Endpoint público: GET /ConsultaPublica/Download/DANFSe?chave=<data_chave>
+                    # Vantagem: não requer autenticação, retorna o PDF oficial completo
+                    nota["url_danfse"] = (
+                        "https://www.nfse.gov.br/ConsultaPublica/Download/DANFSe?chave="
+                        + nota["data_chave"]
+                    ) if nota.get("data_chave") else None
                     novas_notas.append(nota)
 
             # parada se só vier duplicado
@@ -232,51 +240,44 @@ async def baixar_xml(page, nota: dict, download_dir: str):
 
 
 # =========================
-# DOWNLOAD DE PDF VIA PORTAL
-# Tenta obter o PDF oficial do portal usando o mesmo mecanismo
-# robusto do baixar_xml (expect_download + fallback fetch).
-# A URL do PDF segue o padrão do portal substituindo o tipo do arquivo.
+# NOVO: DOWNLOAD DO DANFSe OFICIAL VIA PORTAL PÚBLICO
+# Usa endpoint público /ConsultaPublica/Download/DANFSe?chave=<data_chave>
+# Não requer autenticação — retorna o PDF oficial gerado pelo governo.
+# O data_chave é o token já capturado na listagem do Emissor Nacional.
+# Cascata: expect_download → fetch binário com validação %PDF-
 # =========================
-async def baixar_pdf(page, nota: dict, download_dir: str):
+async def baixar_danfse(page, nota: dict, download_dir: str):
     """
-    Tenta baixar o PDF oficial diretamente do portal NFS-e.
-    Estratégia em cascata:
-      1. expect_download via window.open (igual ao XML)
-      2. fetch com credentials (fallback)
+    Baixa o DANFSe (PDF oficial) via portal público sem autenticação.
     Retorna True se bem-sucedido, False caso contrário.
     """
     try:
+        url = nota.get("url_danfse")
         chave = nota.get("chave_acesso") or nota.get("data_chave", "nota")
-        url_xml = nota.get("url_download")
 
-        if not url_xml or not chave:
+        if not url:
+            print(f"⚠️ url_danfse não disponível para {chave}")
             return False
 
-        # Monta URL do PDF trocando o segmento do endpoint
-        # AJUSTE: Mapeamento de rota do portal para PDF oficial
-        url_pdf = url_xml.replace("/Download/NFSe/", "/Download/NFSePDF/")
-
         caminho = os.path.join(download_dir, f"{chave}.pdf")
+        print(f"📥 Baixando DANFSe: {chave}")
 
-        # Tentativa 1 — expect_download (método mais confiável, igual ao XML)
+        # NOVO: tentativa 1 — expect_download (mesmo mecanismo do XML, mais confiável)
         try:
             async with page.expect_download(timeout=30000) as download_info:
-                await page.evaluate(f"window.open('{url_pdf}', '_blank')")
+                await page.evaluate(f"window.open('{url}', '_blank')")
             download = await download_info.value
             await download.save_as(caminho)
-            print(f"✅ PDF baixado via download direto: {chave}")
+            print(f"✅ DANFSe baixado via download direto: {chave}")
             return True
         except Exception as e1:
-            print(f"⚠️ Download direto falhou ({e1}), tentando fetch...")
+            print(f"⚠️ expect_download falhou ({e1}), tentando fetch...")
 
-        # Tentativa 2 — fetch com credentials (fallback, retorna bytes binários)
+        # NOVO: tentativa 2 — fetch binário (portal público, sem credentials)
         conteudo_b64 = await page.evaluate(f"""async () => {{
             try {{
-                const r = await fetch('{url_pdf}', {{ credentials: 'include' }});
+                const r = await fetch('{url}');
                 if (!r.ok) return null;
-                const ct = r.headers.get('content-type') || '';
-                // Aceita PDF ou octet-stream (comum em fluxos de download)
-                if (!ct.includes('pdf') && !ct.includes('octet-stream')) return null;
                 const buf = await r.arrayBuffer();
                 const bytes = new Uint8Array(buf);
                 let bin = '';
@@ -287,27 +288,27 @@ async def baixar_pdf(page, nota: dict, download_dir: str):
 
         if conteudo_b64:
             dados = base64.b64decode(conteudo_b64)
-            # Valida assinatura do PDF antes de salvar (%PDF-)
+            # NOVO: valida assinatura %PDF- antes de salvar para evitar HTML de erro
             if dados[:4] == b'%PDF':
                 with open(caminho, 'wb') as f:
                     f.write(dados)
-                print(f"✅ PDF salvo via fetch: {chave}")
+                print(f"✅ DANFSe salvo via fetch: {chave}")
                 return True
             else:
-                print(f"⚠️ Resposta recebida mas não é PDF válido para {chave}")
+                print(f"⚠️ Resposta não é PDF válido para {chave} — data_chave pode estar incorreto")
 
-        print(f"❌ PDF não disponível no portal para {chave}")
+        print(f"❌ DANFSe não disponível para {chave}")
         return False
 
     except Exception as e:
-        print(f"❌ Erro ao baixar PDF: {e}")
+        print(f"❌ Erro ao baixar DANFSe: {e}")
         return False
 
 
 # =========================
-# DOWNLOAD EM LOTE — XML (ZIP)
-# Itera sobre a lista de notas e salva todos os XMLs
-# em um diretório, retornando contadores de sucesso/falha.
+# NOVO: DOWNLOAD EM LOTE — XML (para geração de ZIP)
+# Itera sobre a lista de notas e salva todos os XMLs em diretório.
+# Retorna contadores de sucesso/falha e lista de arquivos gerados.
 # =========================
 async def baixar_lote_xml(page, notas: list, download_dir: str):
     """
@@ -332,13 +333,14 @@ async def baixar_lote_xml(page, notas: list, download_dir: str):
 
 
 # =========================
-# DOWNLOAD EM LOTE — PDF (ZIP)
-# Itera sobre a lista de notas e salva todos os PDFs
-# em um diretório, retornando contadores de sucesso/falha.
+# NOVO: DOWNLOAD EM LOTE — DANFSe PDF (para geração de ZIP)
+# Itera sobre a lista de notas e baixa o PDF oficial de cada uma
+# via portal público, sem autenticação.
+# Retorna contadores de sucesso/falha e lista de arquivos gerados.
 # =========================
-async def baixar_lote_pdf(page, notas: list, download_dir: str):
+async def baixar_lote_danfse(page, notas: list, download_dir: str):
     """
-    Baixa PDFs de todas as notas em lote.
+    Baixa DANFSe (PDF oficial) de todas as notas via portal público.
     Retorna dict com totais: { sucesso, falha, arquivos }
     """
     os.makedirs(download_dir, exist_ok=True)
@@ -346,71 +348,13 @@ async def baixar_lote_pdf(page, notas: list, download_dir: str):
 
     for i, nota in enumerate(notas):
         chave = nota.get("chave_acesso") or nota.get("data_chave", f"nota_{i}")
-        print(f"📥 PDF [{i+1}/{len(notas)}] {chave}")
-        ok = await baixar_pdf(page, nota, download_dir)
+        print(f"📥 DANFSe [{i+1}/{len(notas)}] {chave}")
+        ok = await baixar_danfse(page, nota, download_dir)
         if ok:
             sucesso += 1
             arquivos.append(os.path.join(download_dir, f"{chave}.pdf"))
         else:
             falha += 1
 
-    print(f"✅ Lote PDF: {sucesso} ok / {falha} falhas")
+    print(f"✅ Lote DANFSe: {sucesso} ok / {falha} falhas")
     return {"sucesso": sucesso, "falha": falha, "arquivos": arquivos}
-
-# =========================
-# 🔥 NOVO: DOWNLOAD DE PDF
-# =========================
-async def baixar_pdf(page, nota: dict, download_dir: str):
-    try:
-        url_xml = nota.get("url_download")
-        nome_arquivo = nota.get("chave_acesso") or nota.get("data_chave", "nota")
-
-        if not url_xml:
-            return False
-
-        # 🔥 NOVO: monta URL do PDF baseada na do XML
-        url_pdf = url_xml.replace("/Download/NFSe/", "/Download/NFSePDF/")
-
-        caminho = os.path.join(download_dir, f"{nome_arquivo}.pdf")
-
-        # 🔥 NOVO: tentativa 1 (igual XML)
-        try:
-            async with page.expect_download(timeout=30000) as download_info:
-                await page.evaluate(f"window.open('{url_pdf}', '_blank')")
-
-            download = await download_info.value
-            await download.save_as(caminho)
-            return True
-
-        except:
-            # 🔥 NOVO: fallback via fetch (binário)
-            conteudo_b64 = await page.evaluate(f"""async () => {{
-                try {{
-                    const r = await fetch('{url_pdf}', {{ credentials: 'include' }});
-                    if (!r.ok) return null;
-
-                    const buffer = await r.arrayBuffer();
-                    const bytes = new Uint8Array(buffer);
-
-                    let binary = '';
-                    bytes.forEach(b => binary += String.fromCharCode(b));
-
-                    return window.btoa(binary);
-                }} catch(e) {{ return null; }}
-            }}""")
-
-            if conteudo_b64:
-                import base64  # 🔥 NOVO: import local para não mexer no topo
-
-                dados = base64.b64decode(conteudo_b64)
-
-                # 🔥 NOVO: valida assinatura PDF
-                if dados[:4] == b'%PDF':
-                    with open(caminho, 'wb') as f:
-                        f.write(dados)
-                    return True
-
-        return False
-
-    except:
-        return False
