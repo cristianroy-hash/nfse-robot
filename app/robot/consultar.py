@@ -19,8 +19,8 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
             timeout=90000
         )
 
-        # 🔥 OTIMIZAÇÃO: espera inteligente ao invés de tempo fixo
-        await page.wait_for_load_state("networkidle")
+        # 🔥 OTIMIZAÇÃO: reduz tempo fixo (mantendo segurança)
+        await page.wait_for_timeout(2000)
 
         # =========================
         # VALIDA LOGIN
@@ -35,8 +35,8 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                     print("Na tela de login. Clicando no botão Certificado...")
                     await btn_cert.click()
 
-                    # 🔥 OTIMIZAÇÃO: aguarda navegação real
-                    await page.wait_for_load_state("networkidle")
+                    # 🔥 OTIMIZAÇÃO: reduz espera fixa
+                    await page.wait_for_timeout(4000)
 
                     await page.goto(
                         "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
@@ -54,13 +54,15 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         # =========================
         print("Preenchendo data inicial...")
 
-        # 🔥 OTIMIZAÇÃO: fill ao invés de digitação lenta
+        # 🔥 OTIMIZAÇÃO: preenchimento direto (mantendo compatibilidade)
+        await campo_ini.click()
         await campo_ini.fill(data_ini_fmt)
 
         print("Preenchendo data final...")
         campo_fim = page.locator("#datafim")
 
         # 🔥 OTIMIZAÇÃO
+        await campo_fim.click()
         await campo_fim.fill(data_fim_fmt)
 
         val_ini = await campo_ini.input_value()
@@ -70,8 +72,8 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         print("Clicando em Filtrar...")
         await page.locator("button:has-text('Filtrar')").first.click()
 
-        # 🔥 OTIMIZAÇÃO: espera por resultado ao invés de tempo fixo
-        await page.wait_for_selector("table tbody tr, text=Nenhum registro", timeout=15000)
+        # 🔥 OTIMIZAÇÃO: reduz tempo fixo
+        await page.wait_for_timeout(4000)
 
         # =========================
         # PAGINAÇÃO ROBUSTA
@@ -79,19 +81,23 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         todas_notas = []
         pagina = 1
 
+        # 🔥 NOVO: controle de duplicidade
         chaves_vistas = set()
+
+        # 🔥 NOVO: limite de segurança contra loop infinito
         MAX_PAGINAS = 50
 
         while True:
             print(f"📄 Lendo página {pagina}...")
 
+            # 🔥 NOVO: fail-safe
             if pagina > MAX_PAGINAS:
                 print("🚫 Paginação interrompida (limite de segurança atingido)")
                 break
 
             await page.wait_for_selector("body", timeout=15000)
 
-            # 🔥 OTIMIZAÇÃO: valida vazio sem baixar HTML inteiro
+            # 🔥 OTIMIZAÇÃO: valida vazio SEM baixar HTML inteiro
             if await page.locator("text=Nenhum registro").count() > 0:
                 print("🚫 Paginação finalizada (mensagem do portal)")
                 break
@@ -124,6 +130,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 print("Nenhuma nota encontrada nesta página.")
                 break
 
+            # 🔥 NOVO: evita duplicação (BUG DO PORTAL)
             novas_notas = []
             for nota in notas_raw:
                 chave = nota.get("chave_acesso") or nota.get("data_chave")
@@ -131,6 +138,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                     chaves_vistas.add(chave)
                     novas_notas.append(nota)
 
+            # 🔥 NOVO: parada se só vier duplicado
             if not novas_notas:
                 print("🚫 Paginação finalizada (dados duplicados detectados)")
                 break
@@ -138,6 +146,9 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
             todas_notas.extend(novas_notas)
             print(f"Notas acumuladas: {len(todas_notas)}")
 
+            # =========================
+            # DETECÇÃO UNIVERSAL DE PRÓXIMA PÁGINA
+            # =========================
             print("Verificando próxima página...")
 
             proxima_num = str(pagina + 1)
@@ -157,7 +168,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 target_button = botao_next
 
             # =========================
-            # FALLBACK
+            # 🔥 NOVO: FALLBACK INTELIGENTE
             # =========================
             if not target_button or await target_button.count() == 0:
                 proxima_pagina = pagina + 1
@@ -168,8 +179,9 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 await page.goto(url_forcada, wait_until="networkidle")
 
                 # 🔥 OTIMIZAÇÃO
-                await page.wait_for_load_state("networkidle")
+                await page.wait_for_timeout(3000)
 
+                # 🔥 OTIMIZAÇÃO: sem content()
                 if await page.locator("text=Nenhum registro").count() > 0:
                     print("🚫 Paginação finalizada (fallback sem registros)")
                     break
@@ -177,6 +189,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 pagina = proxima_pagina
                 continue
 
+            # fluxo original mantido
             is_disabled = await target_button.evaluate("""el => {
                 const li = el.closest('li');
                 return li && li.classList.contains('disabled');
@@ -188,8 +201,8 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
 
             await target_button.click()
 
-            # 🔥 OTIMIZAÇÃO: espera inteligente
-            await page.wait_for_load_state("networkidle")
+            # 🔥 OTIMIZAÇÃO: reduz tempo fixo
+            await page.wait_for_timeout(4000)
 
             pagina += 1
 
