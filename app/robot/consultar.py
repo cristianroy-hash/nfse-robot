@@ -1,5 +1,6 @@
 import os
 import re
+import base64
 from datetime import datetime
 
 async def consultar_notas(page, data_inicio: str, data_fim: str):
@@ -80,23 +81,23 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         todas_notas = []
         pagina = 1
 
-        # 🔥 NOVO: controle de duplicidade
+        # controle de duplicidade
         chaves_vistas = set()
 
-        # 🔥 NOVO: limite de segurança contra loop infinito
+        # limite de segurança contra loop infinito
         MAX_PAGINAS = 50
 
         while True:
             print(f"📄 Lendo página {pagina}...")
 
-            # 🔥 NOVO: fail-safe
+            # fail-safe
             if pagina > MAX_PAGINAS:
                 print("🚫 Paginação interrompida (limite de segurança atingido)")
                 break
 
             await page.wait_for_selector("body", timeout=15000)
 
-            # 🔥 NOVO: valida página vazia (MAIS ROBUSTO)
+            # valida página vazia (MAIS ROBUSTO)
             texto_pagina = await page.content()
             if "Nenhum registro encontrado" in texto_pagina or "Nenhum registro" in texto_pagina:
                 print("🚫 Paginação finalizada (mensagem do portal)")
@@ -119,9 +120,8 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                         valor: row.getAttribute('data-valor') || '',
                         data: row.querySelector('.td-data')?.innerText.trim() || '',
                         tomador: row.querySelector('.td-texto-grande')?.innerText.trim().substring(0, 60) || '',
-                        url_download: chaveNumerica
-                            ? 'https://www.nfse.gov.br/EmissorNacional/Notas/Download/NFSe/' + chaveNumerica
-                            : null
+                        url_download_xml: chaveNumerica ? 'https://www.nfse.gov.br/EmissorNacional/Notas/Download/NFSe/' + chaveNumerica : null,
+                        url_download_pdf: chaveNumerica ? 'https://www.nfse.gov.br/EmissorNacional/Notas/Visualizar/' + chaveNumerica : null
                     };
                 });
             }""")
@@ -130,15 +130,21 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 print("Nenhuma nota encontrada nesta página.")
                 break
 
-            # 🔥 NOVO: evita duplicação (BUG DO PORTAL)
+            # evita duplicação (BUG DO PORTAL)
             novas_notas = []
             for nota in notas_raw:
                 chave = nota.get("chave_acesso") or nota.get("data_chave")
                 if chave not in chaves_vistas:
                     chaves_vistas.add(chave)
+                    
+                    # 🔥 NOVO: Captura de conteúdo para alimentar o ZIP e PDF no dashboard
+                    print(f"📥 Capturando arquivos da nota {chave}...")
+                    nota["conteudo_xml"] = await capturar_texto_xml_silencioso(page, nota["url_download_xml"])
+                    nota["conteudo_pdf_base64"] = await capturar_pdf_base64_silencioso(page, nota["url_download_pdf"])
+                    
                     novas_notas.append(nota)
 
-            # 🔥 NOVO: parada se só vier duplicado
+            # parada se só vier duplicado
             if not novas_notas:
                 print("🚫 Paginação finalizada (dados duplicados detectados)")
                 break
@@ -168,7 +174,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 target_button = botao_next
 
             # =========================
-            # 🔥 NOVO: FALLBACK INTELIGENTE
+            # FALLBACK INTELIGENTE
             # =========================
             if not target_button or await target_button.count() == 0:
                 proxima_pagina = pagina + 1
@@ -179,7 +185,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 await page.goto(url_forcada, wait_until="networkidle")
                 await page.wait_for_timeout(5000)
 
-                # 🔥 NOVO: valida vazio no fallback
+                # valida vazio no fallback
                 texto_forcado = await page.content()
                 if "Nenhum registro encontrado" in texto_forcado or "Nenhum registro" in texto_forcado:
                     print("🚫 Paginação finalizada (fallback sem registros)")
@@ -213,7 +219,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
 
 async def baixar_xml(page, nota: dict, download_dir: str):
     try:
-        url = nota.get("url_download")
+        url = nota.get("url_download_xml")
         nome_arquivo = nota.get("chave_acesso") or nota.get("data_chave", "nota")
 
         if not url:
@@ -230,6 +236,7 @@ async def baixar_xml(page, nota: dict, download_dir: str):
             return True
 
         except:
+            # Reintegrado exatamente como o original enviado
             conteudo = await page.evaluate(f"""async () => {{
                 try {{
                     const r = await fetch('{url}', {{ credentials: 'include' }});
@@ -246,3 +253,32 @@ async def baixar_xml(page, nota: dict, download_dir: str):
 
     except:
         return False
+
+# =========================
+# 🔥 NOVO: AUXILIARES DE CAPTURA
+# =========================
+
+async def capturar_texto_xml_silencioso(page, url):
+    """ NOVO: Obtém o conteúdo XML sem disparar download visual """
+    if not url: return None
+    try:
+        return await page.evaluate(f"""async () => {{
+            try {{
+                const res = await fetch('{url}', {{ credentials: 'include' }});
+                const text = await res.text();
+                return text.includes('<?xml') ? text : null;
+            }} catch(e) {{ return null; }}
+        }}""")
+    except: return None
+
+async def capturar_pdf_base64_silencioso(page, url):
+    """ NOVO: Gera Base64 do PDF a partir da visualização da nota """
+    if not url: return None
+    try:
+        new_page = await page.context.new_page()
+        await new_page.goto(url, wait_until="networkidle")
+        await new_page.wait_for_timeout(2000)
+        pdf_bytes = await new_page.pdf(format="A4", print_background=True)
+        await new_page.close()
+        return base64.b64encode(pdf_bytes).decode('utf-8')
+    except: return None
