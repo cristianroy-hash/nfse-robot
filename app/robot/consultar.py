@@ -120,8 +120,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                         valor: row.getAttribute('data-valor') || '',
                         data: row.querySelector('.td-data')?.innerText.trim() || '',
                         tomador: row.querySelector('.td-texto-grande')?.innerText.trim().substring(0, 60) || '',
-                        url_download_xml: chaveNumerica ? 'https://www.nfse.gov.br/EmissorNacional/Notas/Download/NFSe/' + chaveNumerica : null,
-                        url_download_pdf: chaveNumerica ? 'https://www.nfse.gov.br/EmissorNacional/Notas/Visualizar/' + chaveNumerica : null
+                        url_download_xml: chaveNumerica ? 'https://www.nfse.gov.br/EmissorNacional/Notas/Download/NFSe/' + chaveNumerica : null
                     };
                 });
             }""")
@@ -137,13 +136,12 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 if chave not in chaves_vistas:
                     chaves_vistas.add(chave)
                     
-                    # 🔥 NOVO: Captura de XML (Essencial para a alternativa de conversão)
+                    # 🔥 NOVO: Captura apenas o XML (Base para geração do PDF no Frontend)
                     print(f"📥 Capturando XML da nota {chave}...")
                     nota["conteudo_xml"] = await capturar_texto_xml_silencioso(page, nota["url_download_xml"])
                     
-                    # 🔥 NOVO: Captura de PDF com "Retry" em caso de erro 404
-                    print(f"📥 Capturando PDF da nota {chave}...")
-                    nota["conteudo_pdf_base64"] = await capturar_pdf_blindado(page, chave)
+                    # Para economizar tempo e evitar 404, não tentamos mais capturar o PDF do portal
+                    nota["conteudo_pdf_base64"] = None 
                     
                     novas_notas.append(nota)
 
@@ -258,11 +256,11 @@ async def baixar_xml(page, nota: dict, download_dir: str):
         return False
 
 # =========================
-# 🔥 NOVO: AUXILIARES DE CAPTURA
+# 🔥 NOVO: AUXILIAR DE CAPTURA XML
 # =========================
 
 async def capturar_texto_xml_silencioso(page, url):
-    """ NOVO: Obtém o conteúdo XML sem disparar download visual """
+    """ Obtém o conteúdo XML sem disparar download visual """
     if not url: return None
     try:
         return await page.evaluate(f"""async () => {{
@@ -273,35 +271,3 @@ async def capturar_texto_xml_silencioso(page, url):
             }} catch(e) {{ return null; }}
         }}""")
     except: return None
-
-async def capturar_pdf_blindado(page, chave_acesso):
-    """ NOVO: Tenta capturar o PDF via clique, com uma segunda tentativa se der erro de recurso não encontrado """
-    for tentativa in range(2):
-        try:
-            btn_visualizar = page.locator(f"a[href*='/Visualizar/{chave_acesso}']").first
-            
-            if await btn_visualizar.count() > 0:
-                async with page.context.expect_page() as new_page_info:
-                    await btn_visualizar.click()
-                
-                new_page = await new_page_info.value
-                await new_page.wait_for_load_state("networkidle")
-                
-                # Checa se caiu na página de erro 404
-                conteudo = await new_page.content()
-                if "The resource cannot be found" in conteudo or "Server Error" in conteudo:
-                    print(f"⚠️ Erro 404 detectado na nota {chave_acesso}. Tentativa {tentativa + 1}...")
-                    await new_page.close()
-                    await page.wait_for_timeout(3000)
-                    continue # Tenta de novo
-                
-                await new_page.wait_for_timeout(2000)
-                pdf_bytes = await new_page.pdf(format="A4", print_background=True)
-                await new_page.close()
-                
-                return base64.b64encode(pdf_bytes).decode('utf-8')
-        except Exception as e:
-            print(f"Erro na tentativa {tentativa}: {e}")
-            await page.wait_for_timeout(2000)
-            
-    return None
