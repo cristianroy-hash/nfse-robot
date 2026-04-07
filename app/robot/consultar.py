@@ -356,3 +356,61 @@ async def baixar_lote_pdf(page, notas: list, download_dir: str):
 
     print(f"✅ Lote PDF: {sucesso} ok / {falha} falhas")
     return {"sucesso": sucesso, "falha": falha, "arquivos": arquivos}
+
+# =========================
+# 🔥 NOVO: DOWNLOAD DE PDF
+# =========================
+async def baixar_pdf(page, nota: dict, download_dir: str):
+    try:
+        url_xml = nota.get("url_download")
+        nome_arquivo = nota.get("chave_acesso") or nota.get("data_chave", "nota")
+
+        if not url_xml:
+            return False
+
+        # 🔥 NOVO: monta URL do PDF baseada na do XML
+        url_pdf = url_xml.replace("/Download/NFSe/", "/Download/NFSePDF/")
+
+        caminho = os.path.join(download_dir, f"{nome_arquivo}.pdf")
+
+        # 🔥 NOVO: tentativa 1 (igual XML)
+        try:
+            async with page.expect_download(timeout=30000) as download_info:
+                await page.evaluate(f"window.open('{url_pdf}', '_blank')")
+
+            download = await download_info.value
+            await download.save_as(caminho)
+            return True
+
+        except:
+            # 🔥 NOVO: fallback via fetch (binário)
+            conteudo_b64 = await page.evaluate(f"""async () => {{
+                try {{
+                    const r = await fetch('{url_pdf}', {{ credentials: 'include' }});
+                    if (!r.ok) return null;
+
+                    const buffer = await r.arrayBuffer();
+                    const bytes = new Uint8Array(buffer);
+
+                    let binary = '';
+                    bytes.forEach(b => binary += String.fromCharCode(b));
+
+                    return window.btoa(binary);
+                }} catch(e) {{ return null; }}
+            }}""")
+
+            if conteudo_b64:
+                import base64  # 🔥 NOVO: import local para não mexer no topo
+
+                dados = base64.b64decode(conteudo_b64)
+
+                # 🔥 NOVO: valida assinatura PDF
+                if dados[:4] == b'%PDF':
+                    with open(caminho, 'wb') as f:
+                        f.write(dados)
+                    return True
+
+        return False
+
+    except:
+        return False
