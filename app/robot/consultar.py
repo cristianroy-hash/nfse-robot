@@ -137,11 +137,13 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 if chave not in chaves_vistas:
                     chaves_vistas.add(chave)
                     
-                    # 🔥 NOVO: Captura de conteúdo para alimentar o ZIP e PDF no dashboard
-                    print(f"📥 Capturando arquivos da nota {chave}...")
+                    # 🔥 NOVO: Captura de XML (Essencial para a alternativa de conversão)
+                    print(f"📥 Capturando XML da nota {chave}...")
                     nota["conteudo_xml"] = await capturar_texto_xml_silencioso(page, nota["url_download_xml"])
-                    # 🔥 NOVO: Captura via clique para evitar erro 404 de sessão
-                    nota["conteudo_pdf_base64"] = await capturar_pdf_clicando(page, chave)
+                    
+                    # 🔥 NOVO: Captura de PDF com "Retry" em caso de erro 404
+                    print(f"📥 Capturando PDF da nota {chave}...")
+                    nota["conteudo_pdf_base64"] = await capturar_pdf_blindado(page, chave)
                     
                     novas_notas.append(nota)
 
@@ -272,23 +274,34 @@ async def capturar_texto_xml_silencioso(page, url):
         }}""")
     except: return None
 
-async def capturar_pdf_clicando(page, chave_acesso):
-    """ NOVO: Captura PDF via clique real na tabela para evitar erro 404 de sessão """
-    try:
-        btn_visualizar = page.locator(f"a[href*='/Visualizar/{chave_acesso}']").first
-        
-        if await btn_visualizar.count() > 0:
-            async with page.context.expect_page() as new_page_info:
-                await btn_visualizar.click()
+async def capturar_pdf_blindado(page, chave_acesso):
+    """ NOVO: Tenta capturar o PDF via clique, com uma segunda tentativa se der erro de recurso não encontrado """
+    for tentativa in range(2):
+        try:
+            btn_visualizar = page.locator(f"a[href*='/Visualizar/{chave_acesso}']").first
             
-            new_page = await new_page_info.value
-            await new_page.wait_for_load_state("networkidle")
-            await new_page.wait_for_timeout(2000)
+            if await btn_visualizar.count() > 0:
+                async with page.context.expect_page() as new_page_info:
+                    await btn_visualizar.click()
+                
+                new_page = await new_page_info.value
+                await new_page.wait_for_load_state("networkidle")
+                
+                # Checa se caiu na página de erro 404
+                conteudo = await new_page.content()
+                if "The resource cannot be found" in conteudo or "Server Error" in conteudo:
+                    print(f"⚠️ Erro 404 detectado na nota {chave_acesso}. Tentativa {tentativa + 1}...")
+                    await new_page.close()
+                    await page.wait_for_timeout(3000)
+                    continue # Tenta de novo
+                
+                await new_page.wait_for_timeout(2000)
+                pdf_bytes = await new_page.pdf(format="A4", print_background=True)
+                await new_page.close()
+                
+                return base64.b64encode(pdf_bytes).decode('utf-8')
+        except Exception as e:
+            print(f"Erro na tentativa {tentativa}: {e}")
+            await page.wait_for_timeout(2000)
             
-            pdf_bytes = await new_page.pdf(format="A4", print_background=True)
-            await new_page.close()
-            
-            return base64.b64encode(pdf_bytes).decode('utf-8')
-    except:
-        pass
     return None
