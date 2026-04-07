@@ -19,8 +19,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
             timeout=90000
         )
 
-        # 🔥 OTIMIZAÇÃO: reduz tempo fixo (mantendo segurança)
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(5000)
 
         # =========================
         # VALIDA LOGIN
@@ -34,9 +33,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 if await btn_cert.count() > 0:
                     print("Na tela de login. Clicando no botão Certificado...")
                     await btn_cert.click()
-
-                    # 🔥 OTIMIZAÇÃO: reduz espera fixa
-                    await page.wait_for_timeout(4000)
+                    await page.wait_for_timeout(8000)
 
                     await page.goto(
                         "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
@@ -53,17 +50,21 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         # FILTRO
         # =========================
         print("Preenchendo data inicial...")
-
-        # 🔥 OTIMIZAÇÃO: preenchimento direto (mantendo compatibilidade)
         await campo_ini.click()
-        await campo_ini.fill(data_ini_fmt)
+        await page.keyboard.press("Control+A")
+        await page.keyboard.press("Backspace")
+        await page.keyboard.type(data_ini_fmt, delay=100)
+        await page.keyboard.press("Tab")
+        await page.wait_for_timeout(800)
 
         print("Preenchendo data final...")
         campo_fim = page.locator("#datafim")
-
-        # 🔥 OTIMIZAÇÃO
         await campo_fim.click()
-        await campo_fim.fill(data_fim_fmt)
+        await page.keyboard.press("Control+A")
+        await page.keyboard.press("Backspace")
+        await page.keyboard.type(data_fim_fmt, delay=100)
+        await page.keyboard.press("Tab")
+        await page.wait_for_timeout(800)
 
         val_ini = await campo_ini.input_value()
         val_fim = await campo_fim.input_value()
@@ -71,9 +72,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
 
         print("Clicando em Filtrar...")
         await page.locator("button:has-text('Filtrar')").first.click()
-
-        # 🔥 OTIMIZAÇÃO: reduz tempo fixo
-        await page.wait_for_timeout(4000)
+        await page.wait_for_timeout(8000)
 
         # =========================
         # PAGINAÇÃO ROBUSTA
@@ -97,8 +96,9 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
 
             await page.wait_for_selector("body", timeout=15000)
 
-            # 🔥 OTIMIZAÇÃO: valida vazio SEM baixar HTML inteiro
-            if await page.locator("text=Nenhum registro").count() > 0:
+            # 🔥 NOVO: valida página vazia (MAIS ROBUSTO)
+            texto_pagina = await page.content()
+            if "Nenhum registro encontrado" in texto_pagina or "Nenhum registro" in texto_pagina:
                 print("🚫 Paginação finalizada (mensagem do portal)")
                 break
 
@@ -177,12 +177,11 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 print(f"➡️ [FALLBACK] Forçando navegação para página {proxima_pagina}")
 
                 await page.goto(url_forcada, wait_until="networkidle")
+                await page.wait_for_timeout(5000)
 
-                # 🔥 OTIMIZAÇÃO
-                await page.wait_for_timeout(3000)
-
-                # 🔥 OTIMIZAÇÃO: sem content()
-                if await page.locator("text=Nenhum registro").count() > 0:
+                # 🔥 NOVO: valida vazio no fallback
+                texto_forcado = await page.content()
+                if "Nenhum registro encontrado" in texto_forcado or "Nenhum registro" in texto_forcado:
                     print("🚫 Paginação finalizada (fallback sem registros)")
                     break
 
@@ -200,9 +199,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 break
 
             await target_button.click()
-
-            # 🔥 OTIMIZAÇÃO: reduz tempo fixo
-            await page.wait_for_timeout(4000)
+            await page.wait_for_timeout(9000)
 
             pagina += 1
 
