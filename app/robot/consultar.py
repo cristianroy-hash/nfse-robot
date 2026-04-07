@@ -6,20 +6,17 @@ from datetime import datetime
 async def consultar_notas(page, data_inicio: str, data_fim: str):
     try:
         print(f"Período: {data_inicio} a {data_fim}")
-
         dt_ini = datetime.strptime(data_inicio, "%Y-%m-%d")
         dt_fim = datetime.strptime(data_fim, "%Y-%m-%d")
         data_ini_fmt = dt_ini.strftime("%d/%m/%Y")
         data_fim_fmt = dt_fim.strftime("%d/%m/%Y")
         print(f"Datas formatadas: {data_ini_fmt} a {data_fim_fmt}")
-
         print("Navegando para o portal de Notas Emitidas...")
         await page.goto(
             "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
             wait_until="networkidle",
             timeout=90000
         )
-
         await page.wait_for_timeout(5000)
 
         # =========================
@@ -27,15 +24,12 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         # =========================
         if await page.locator("#datainicio").count() == 0:
             print(f"Campo #datainicio não encontrado. URL atual: {page.url}")
-
             if "Login" in page.url:
                 btn_cert = page.locator("a[href*='Certificado'], button:has-text('Certificado')").first
-
                 if await btn_cert.count() > 0:
                     print("Na tela de login. Clicando no botão Certificado...")
                     await btn_cert.click()
                     await page.wait_for_timeout(8000)
-
                     await page.goto(
                         "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
                         wait_until="networkidle"
@@ -112,7 +106,6 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                     const htmlRow = row.innerHTML;
                     const matchChave = htmlRow.match(/Download\\/NFSe\\/([0-9]{40,60})/);
                     const chaveNumerica = matchChave ? matchChave[1] : null;
-
                     return {
                         data_chave: chaveEncoded,
                         chave_acesso: chaveNumerica,
@@ -120,7 +113,9 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                         valor: row.getAttribute('data-valor') || '',
                         data: row.querySelector('.td-data')?.innerText.trim() || '',
                         tomador: row.querySelector('.td-texto-grande')?.innerText.trim().substring(0, 60) || '',
-                        url_download_xml: chaveNumerica ? 'https://www.nfse.gov.br/EmissorNacional/Notas/Download/NFSe/' + chaveNumerica : null
+                        url_download: chaveNumerica
+                            ? 'https://www.nfse.gov.br/EmissorNacional/Notas/Download/NFSe/' + chaveNumerica
+                            : null
                     };
                 });
             }""")
@@ -135,14 +130,6 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 chave = nota.get("chave_acesso") or nota.get("data_chave")
                 if chave not in chaves_vistas:
                     chaves_vistas.add(chave)
-                    
-                    # 🔥 NOVO: Captura apenas o XML (Base para geração do PDF no Frontend)
-                    print(f"📥 Capturando XML da nota {chave}...")
-                    nota["conteudo_xml"] = await capturar_texto_xml_silencioso(page, nota["url_download_xml"])
-                    
-                    # Para economizar tempo e evitar 404, não tentamos mais capturar o PDF do portal
-                    nota["conteudo_pdf_base64"] = None 
-                    
                     novas_notas.append(nota)
 
             # parada se só vier duplicado
@@ -157,16 +144,13 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
             # DETECÇÃO UNIVERSAL DE PRÓXIMA PÁGINA
             # =========================
             print("Verificando próxima página...")
-
             proxima_num = str(pagina + 1)
             botao_num = page.locator(f"ul.pagination li a:text-is('{proxima_num}')").first
-
             botao_next = page.locator(
                 "ul.pagination li a[rel='next'], ul.pagination li a:has-text('>'), ul.pagination li a:has-text('›'), ul.pagination li a:has-text('»')"
             ).first
 
             target_button = None
-
             if await botao_num.count() > 0:
                 print(f"➡️ Indo para página {proxima_num}")
                 target_button = botao_num
@@ -180,9 +164,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
             if not target_button or await target_button.count() == 0:
                 proxima_pagina = pagina + 1
                 url_forcada = f"https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas?pg={proxima_pagina}&datainicio={data_ini_fmt}&datafim={data_fim_fmt}"
-
                 print(f"➡️ [FALLBACK] Forçando navegação para página {proxima_pagina}")
-
                 await page.goto(url_forcada, wait_until="networkidle")
                 await page.wait_for_timeout(5000)
 
@@ -200,14 +182,12 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 const li = el.closest('li');
                 return li && li.classList.contains('disabled');
             }""")
-
             if is_disabled:
                 print("🚫 Botão próximo desabilitado")
                 break
 
             await target_button.click()
             await page.wait_for_timeout(9000)
-
             pagina += 1
 
         print(f"✅ Total final de notas: {len(todas_notas)}")
@@ -220,7 +200,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
 
 async def baixar_xml(page, nota: dict, download_dir: str):
     try:
-        url = nota.get("url_download_xml")
+        url = nota.get("url_download")
         nome_arquivo = nota.get("chave_acesso") or nota.get("data_chave", "nota")
 
         if not url:
@@ -231,43 +211,149 @@ async def baixar_xml(page, nota: dict, download_dir: str):
         try:
             async with page.expect_download(timeout=30000) as download_info:
                 await page.evaluate(f"window.open('{url}', '_blank')")
-
             download = await download_info.value
             await download.save_as(caminho)
             return True
-
         except:
-            # Reintegrado exatamente como o original enviado
             conteudo = await page.evaluate(f"""async () => {{
                 try {{
                     const r = await fetch('{url}', {{ credentials: 'include' }});
                     return await r.text();
                 }} catch(e) {{ return null; }}
             }}""")
-
             if conteudo and "<?xml" in conteudo:
                 with open(caminho, 'w', encoding='utf-8') as f:
                     f.write(conteudo)
                 return True
 
         return False
-
     except:
         return False
 
-# =========================
-# 🔥 NOVO: AUXILIAR DE CAPTURA XML
-# =========================
 
-async def capturar_texto_xml_silencioso(page, url):
-    """ Obtém o conteúdo XML sem disparar download visual """
-    if not url: return None
+# =========================
+# NOVO: DOWNLOAD DE PDF VIA PORTAL
+# Tenta obter o PDF oficial do portal usando o mesmo mecanismo
+# robusto do baixar_xml (expect_download + fallback fetch).
+# A URL do PDF segue o padrão do portal substituindo o tipo do arquivo.
+# =========================
+async def baixar_pdf(page, nota: dict, download_dir: str):
+    """
+    Tenta baixar o PDF oficial diretamente do portal NFS-e.
+    Estratégia em cascata:
+      1. expect_download via window.open (igual ao XML)
+      2. fetch com credentials (fallback)
+    Retorna True se bem-sucedido, False caso contrário.
+    """
     try:
-        return await page.evaluate(f"""async () => {{
+        chave = nota.get("chave_acesso") or nota.get("data_chave", "nota")
+        url_xml = nota.get("url_download")
+
+        if not url_xml or not chave:
+            return False
+
+        # NOVO: monta URL do PDF trocando o segmento do endpoint
+        # O portal usa /Download/NFSe/<chave> para XML
+        # e /Download/NFSePDF/<chave> para PDF (padrão observado no portal)
+        url_pdf = url_xml.replace("/Download/NFSe/", "/Download/NFSePDF/")
+
+        caminho = os.path.join(download_dir, f"{chave}.pdf")
+
+        # NOVO: tentativa 1 — expect_download (método mais confiável, igual ao XML)
+        try:
+            async with page.expect_download(timeout=30000) as download_info:
+                await page.evaluate(f"window.open('{url_pdf}', '_blank')")
+            download = await download_info.value
+            await download.save_as(caminho)
+            print(f"✅ PDF baixado via download direto: {chave}")
+            return True
+        except Exception as e1:
+            print(f"⚠️ Download direto falhou ({e1}), tentando fetch...")
+
+        # NOVO: tentativa 2 — fetch com credentials (fallback, retorna bytes binários)
+        conteudo_b64 = await page.evaluate(f"""async () => {{
             try {{
-                const res = await fetch('{url}', {{ credentials: 'include' }});
-                const text = await res.text();
-                return text.includes('<?xml') ? text : null;
+                const r = await fetch('{url_pdf}', {{ credentials: 'include' }});
+                if (!r.ok) return null;
+                const ct = r.headers.get('content-type') || '';
+                // NOVO: aceita PDF ou octet-stream (alguns portais enviam assim)
+                if (!ct.includes('pdf') && !ct.includes('octet-stream')) return null;
+                const buf = await r.arrayBuffer();
+                const bytes = new Uint8Array(buf);
+                let bin = '';
+                bytes.forEach(b => bin += String.fromCharCode(b));
+                return window.btoa(bin);
             }} catch(e) {{ return null; }}
         }}""")
-    except: return None
+
+        if conteudo_b64:
+            dados = base64.b64decode(conteudo_b64)
+            # NOVO: valida assinatura do PDF antes de salvar (%PDF-)
+            if dados[:4] == b'%PDF':
+                with open(caminho, 'wb') as f:
+                    f.write(dados)
+                print(f"✅ PDF salvo via fetch: {chave}")
+                return True
+            else:
+                print(f"⚠️ Resposta recebida mas não é PDF válido para {chave}")
+
+        print(f"❌ PDF não disponível no portal para {chave}")
+        return False
+
+    except Exception as e:
+        print(f"❌ Erro ao baixar PDF: {e}")
+        return False
+
+
+# =========================
+# NOVO: DOWNLOAD EM LOTE — XML (ZIP)
+# Itera sobre a lista de notas e salva todos os XMLs
+# em um diretório, retornando contadores de sucesso/falha.
+# =========================
+async def baixar_lote_xml(page, notas: list, download_dir: str):
+    """
+    Baixa XMLs de todas as notas em lote.
+    Retorna dict com totais: { sucesso, falha, arquivos }
+    """
+    os.makedirs(download_dir, exist_ok=True)
+    sucesso, falha, arquivos = 0, 0, []
+
+    for i, nota in enumerate(notas):
+        chave = nota.get("chave_acesso") or nota.get("data_chave", f"nota_{i}")
+        print(f"📥 XML [{i+1}/{len(notas)}] {chave}")
+        ok = await baixar_xml(page, nota, download_dir)
+        if ok:
+            sucesso += 1
+            arquivos.append(os.path.join(download_dir, f"{chave}.xml"))
+        else:
+            falha += 1
+
+    print(f"✅ Lote XML: {sucesso} ok / {falha} falhas")
+    return {"sucesso": sucesso, "falha": falha, "arquivos": arquivos}
+
+
+# =========================
+# NOVO: DOWNLOAD EM LOTE — PDF (ZIP)
+# Itera sobre a lista de notas e salva todos os PDFs
+# em um diretório, retornando contadores de sucesso/falha.
+# =========================
+async def baixar_lote_pdf(page, notas: list, download_dir: str):
+    """
+    Baixa PDFs de todas as notas em lote.
+    Retorna dict com totais: { sucesso, falha, arquivos }
+    """
+    os.makedirs(download_dir, exist_ok=True)
+    sucesso, falha, arquivos = 0, 0, []
+
+    for i, nota in enumerate(notas):
+        chave = nota.get("chave_acesso") or nota.get("data_chave", f"nota_{i}")
+        print(f"📥 PDF [{i+1}/{len(notas)}] {chave}")
+        ok = await baixar_pdf(page, nota, download_dir)
+        if ok:
+            sucesso += 1
+            arquivos.append(os.path.join(download_dir, f"{chave}.pdf"))
+        else:
+            falha += 1
+
+    print(f"✅ Lote PDF: {sucesso} ok / {falha} falhas")
+    return {"sucesso": sucesso, "falha": falha, "arquivos": arquivos}
