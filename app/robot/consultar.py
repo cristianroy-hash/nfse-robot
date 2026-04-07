@@ -104,7 +104,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 return Array.from(rows).map(row => {
                     const chaveEncoded = row.getAttribute('data-chave');
                     const htmlRow = row.innerHTML;
-                    // AJUSTE: Captura flexível para garantir que o link do XML (chaveNumerica) seja lido
+                    // Regex flexível para capturar o ID numérico do XML no link de download
                     const matchChave = htmlRow.match(/Download\/NFSe\/([0-9]+)/);
                     const chaveNumerica = matchChave ? matchChave[1] : null;
                     return {
@@ -133,8 +133,6 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                     chaves_vistas.add(chave)
                     # NOVO: monta URL do DANFSe oficial via portal público
                     # O data_chave já capturado na listagem é o token que o portal público usa
-                    # Endpoint público: GET /ConsultaPublica/Download/DANFSe?chave=<data_chave>
-                    # Vantagem: não requer autenticação, retorna o PDF oficial completo
                     nota["url_danfse"] = (
                         "https://www.nfse.gov.br/ConsultaPublica/Download/DANFSe?chave="
                         + nota["data_chave"]
@@ -213,7 +211,7 @@ async def baixar_xml(page, nota: dict, download_dir: str):
         nome_arquivo = nota.get("chave_acesso") or nota.get("data_chave", "nota")
 
         if not url:
-            print(f"⚠️ url_download não disponível para {nome_arquivo}")
+            print(f"⚠️ Sem URL de download para {nome_arquivo}")
             return False
 
         caminho = os.path.join(download_dir, f"{nome_arquivo}.xml")
@@ -224,8 +222,7 @@ async def baixar_xml(page, nota: dict, download_dir: str):
             download = await download_info.value
             await download.save_as(caminho)
             return True
-        except Exception as e:
-            print(f"Tentando fetch para XML: {nome_arquivo}")
+        except:
             conteudo = await page.evaluate(f"""async () => {{
                 try {{
                     const r = await fetch('{url}', {{ credentials: 'include' }});
@@ -236,7 +233,6 @@ async def baixar_xml(page, nota: dict, download_dir: str):
                 with open(caminho, 'w', encoding='utf-8') as f:
                     f.write(conteudo)
                 return True
-
         return False
     except:
         return False
@@ -255,46 +251,40 @@ async def baixar_danfse(page, nota: dict, download_dir: str):
             return False
 
         caminho = os.path.join(download_dir, f"{chave}.pdf")
-        print(f"📥 Baixando DANFSe: {chave}")
 
         try:
             async with page.expect_download(timeout=30000) as download_info:
                 await page.evaluate(f"window.open('{url}', '_blank')")
             download = await download_info.value
             await download.save_as(caminho)
-            print(f"✅ DANFSe baixado via download direto: {chave}")
             return True
-        except Exception as e1:
-            print(f"⚠️ expect_download falhou, tentando fetch para PDF...")
+        except Exception:
+            # Fallback fetch b64 para PDF
+            conteudo_b64 = await page.evaluate(f"""async () => {{
+                try {{
+                    const r = await fetch('{url}');
+                    if (!r.ok) return null;
+                    const buf = await r.arrayBuffer();
+                    const bytes = new Uint8Array(buf);
+                    let bin = '';
+                    bytes.forEach(b => bin += String.fromCharCode(b));
+                    return window.btoa(bin);
+                }} catch(e) {{ return null; }}
+            }}""")
 
-        conteudo_b64 = await page.evaluate(f"""async () => {{
-            try {{
-                const r = await fetch('{url}');
-                if (!r.ok) return null;
-                const buf = await r.arrayBuffer();
-                const bytes = new Uint8Array(buf);
-                let bin = '';
-                bytes.forEach(b => bin += String.fromCharCode(b));
-                return window.btoa(bin);
-            }} catch(e) {{ return null; }}
-        }}""")
-
-        if conteudo_b64:
-            dados = base64.b64decode(conteudo_b64)
-            if dados[:4] == b'%PDF':
-                with open(caminho, 'wb') as f:
-                    f.write(dados)
-                print(f"✅ DANFSe salvo via fetch: {chave}")
-                return True
-
+            if conteudo_b64:
+                dados = base64.b64decode(conteudo_b64)
+                if dados[:4] == b'%PDF':
+                    with open(caminho, 'wb') as f:
+                        f.write(dados)
+                    return True
         return False
-    except Exception as e:
-        print(f"❌ Erro ao baixar DANFSe: {e}")
+    except Exception:
         return False
 
 
 # =========================
-# NOVO: DOWNLOAD EM LOTE — XML (Adicionado Delay para evitar 404/Block)
+# NOVO: DOWNLOAD EM LOTE — XML (ZIP)
 # =========================
 async def baixar_lote_xml(page, notas: list, download_dir: str):
     os.makedirs(download_dir, exist_ok=True)
@@ -302,21 +292,19 @@ async def baixar_lote_xml(page, notas: list, download_dir: str):
 
     for i, nota in enumerate(notas):
         chave = nota.get("chave_acesso") or nota.get("data_chave", f"nota_{i}")
-        print(f"📥 XML [{i+1}/{len(notas)}] {chave}")
         ok = await baixar_xml(page, nota, download_dir)
         if ok:
             sucesso += 1
             arquivos.append(os.path.join(download_dir, f"{chave}.xml"))
         else:
             falha += 1
-        await page.wait_for_timeout(2000) # Delay de segurança
+        await page.wait_for_timeout(1000)
 
-    print(f"✅ Lote XML: {sucesso} ok / {falha} falhas")
     return {"sucesso": sucesso, "falha": falha, "arquivos": arquivos}
 
 
 # =========================
-# NOVO: DOWNLOAD EM LOTE — DANFSe PDF (Adicionado Delay para evitar 404/Block)
+# NOVO: DOWNLOAD EM LOTE — DANFSe PDF (ZIP)
 # =========================
 async def baixar_lote_danfse(page, notas: list, download_dir: str):
     os.makedirs(download_dir, exist_ok=True)
@@ -324,14 +312,12 @@ async def baixar_lote_danfse(page, notas: list, download_dir: str):
 
     for i, nota in enumerate(notas):
         chave = nota.get("chave_acesso") or nota.get("data_chave", f"nota_{i}")
-        print(f"📥 DANFSe [{i+1}/{len(notas)}] {chave}")
         ok = await baixar_danfse(page, nota, download_dir)
         if ok:
             sucesso += 1
             arquivos.append(os.path.join(download_dir, f"{chave}.pdf"))
         else:
             falha += 1
-        await page.wait_for_timeout(2000) # Delay de segurança
+        await page.wait_for_timeout(1000)
 
-    print(f"✅ Lote DANFSe: {sucesso} ok / {falha} falhas")
     return {"sucesso": sucesso, "falha": falha, "arquivos": arquivos}
