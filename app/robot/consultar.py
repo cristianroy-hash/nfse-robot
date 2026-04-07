@@ -104,7 +104,8 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 return Array.from(rows).map(row => {
                     const chaveEncoded = row.getAttribute('data-chave');
                     const htmlRow = row.innerHTML;
-                    const matchChave = htmlRow.match(/Download\\/NFSe\\/([0-9]{40,60})/);
+                    // AJUSTE: Regex flexível para garantir captura do ID numérico do XML
+                    const matchChave = htmlRow.match(/Download\/NFSe\/([0-9]+)/);
                     const chaveNumerica = matchChave ? matchChave[1] : null;
                     return {
                         data_chave: chaveEncoded,
