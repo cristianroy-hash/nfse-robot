@@ -104,7 +104,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 return Array.from(rows).map(row => {
                     const chaveEncoded = row.getAttribute('data-chave');
                     const htmlRow = row.innerHTML;
-                    // AJUSTE: Regex flexível para garantir captura do ID numérico do XML
+                    // AJUSTE: Captura flexível para garantir que o link do XML (chaveNumerica) seja lido
                     const matchChave = htmlRow.match(/Download\/NFSe\/([0-9]+)/);
                     const chaveNumerica = matchChave ? matchChave[1] : null;
                     return {
@@ -213,6 +213,7 @@ async def baixar_xml(page, nota: dict, download_dir: str):
         nome_arquivo = nota.get("chave_acesso") or nota.get("data_chave", "nota")
 
         if not url:
+            print(f"⚠️ url_download não disponível para {nome_arquivo}")
             return False
 
         caminho = os.path.join(download_dir, f"{nome_arquivo}.xml")
@@ -223,7 +224,8 @@ async def baixar_xml(page, nota: dict, download_dir: str):
             download = await download_info.value
             await download.save_as(caminho)
             return True
-        except:
+        except Exception as e:
+            print(f"Tentando fetch para XML: {nome_arquivo}")
             conteudo = await page.evaluate(f"""async () => {{
                 try {{
                     const r = await fetch('{url}', {{ credentials: 'include' }});
@@ -242,16 +244,8 @@ async def baixar_xml(page, nota: dict, download_dir: str):
 
 # =========================
 # NOVO: DOWNLOAD DO DANFSe OFICIAL VIA PORTAL PÚBLICO
-# Usa endpoint público /ConsultaPublica/Download/DANFSe?chave=<data_chave>
-# Não requer autenticação — retorna o PDF oficial gerado pelo governo.
-# O data_chave é o token já capturado na listagem do Emissor Nacional.
-# Cascata: expect_download → fetch binário com validação %PDF-
 # =========================
 async def baixar_danfse(page, nota: dict, download_dir: str):
-    """
-    Baixa o DANFSe (PDF oficial) via portal público sem autenticação.
-    Retorna True se bem-sucedido, False caso contrário.
-    """
     try:
         url = nota.get("url_danfse")
         chave = nota.get("chave_acesso") or nota.get("data_chave", "nota")
@@ -263,7 +257,6 @@ async def baixar_danfse(page, nota: dict, download_dir: str):
         caminho = os.path.join(download_dir, f"{chave}.pdf")
         print(f"📥 Baixando DANFSe: {chave}")
 
-        # NOVO: tentativa 1 — expect_download (mesmo mecanismo do XML, mais confiável)
         try:
             async with page.expect_download(timeout=30000) as download_info:
                 await page.evaluate(f"window.open('{url}', '_blank')")
@@ -272,9 +265,8 @@ async def baixar_danfse(page, nota: dict, download_dir: str):
             print(f"✅ DANFSe baixado via download direto: {chave}")
             return True
         except Exception as e1:
-            print(f"⚠️ expect_download falhou ({e1}), tentando fetch...")
+            print(f"⚠️ expect_download falhou, tentando fetch para PDF...")
 
-        # NOVO: tentativa 2 — fetch binário (portal público, sem credentials)
         conteudo_b64 = await page.evaluate(f"""async () => {{
             try {{
                 const r = await fetch('{url}');
@@ -289,33 +281,22 @@ async def baixar_danfse(page, nota: dict, download_dir: str):
 
         if conteudo_b64:
             dados = base64.b64decode(conteudo_b64)
-            # NOVO: valida assinatura %PDF- antes de salvar para evitar HTML de erro
             if dados[:4] == b'%PDF':
                 with open(caminho, 'wb') as f:
                     f.write(dados)
                 print(f"✅ DANFSe salvo via fetch: {chave}")
                 return True
-            else:
-                print(f"⚠️ Resposta não é PDF válido para {chave} — data_chave pode estar incorreto")
 
-        print(f"❌ DANFSe não disponível para {chave}")
         return False
-
     except Exception as e:
         print(f"❌ Erro ao baixar DANFSe: {e}")
         return False
 
 
 # =========================
-# NOVO: DOWNLOAD EM LOTE — XML (para geração de ZIP)
-# Itera sobre a lista de notas e salva todos os XMLs em diretório.
-# Retorna contadores de sucesso/falha e lista de arquivos gerados.
+# NOVO: DOWNLOAD EM LOTE — XML (Adicionado Delay para evitar 404/Block)
 # =========================
 async def baixar_lote_xml(page, notas: list, download_dir: str):
-    """
-    Baixa XMLs de todas as notas em lote.
-    Retorna dict com totais: { sucesso, falha, arquivos }
-    """
     os.makedirs(download_dir, exist_ok=True)
     sucesso, falha, arquivos = 0, 0, []
 
@@ -328,22 +309,16 @@ async def baixar_lote_xml(page, notas: list, download_dir: str):
             arquivos.append(os.path.join(download_dir, f"{chave}.xml"))
         else:
             falha += 1
+        await page.wait_for_timeout(2000) # Delay de segurança
 
     print(f"✅ Lote XML: {sucesso} ok / {falha} falhas")
     return {"sucesso": sucesso, "falha": falha, "arquivos": arquivos}
 
 
 # =========================
-# NOVO: DOWNLOAD EM LOTE — DANFSe PDF (para geração de ZIP)
-# Itera sobre a lista de notas e baixa o PDF oficial de cada uma
-# via portal público, sem autenticação.
-# Retorna contadores de sucesso/falha e lista de arquivos gerados.
+# NOVO: DOWNLOAD EM LOTE — DANFSe PDF (Adicionado Delay para evitar 404/Block)
 # =========================
 async def baixar_lote_danfse(page, notas: list, download_dir: str):
-    """
-    Baixa DANFSe (PDF oficial) de todas as notas via portal público.
-    Retorna dict com totais: { sucesso, falha, arquivos }
-    """
     os.makedirs(download_dir, exist_ok=True)
     sucesso, falha, arquivos = 0, 0, []
 
@@ -356,6 +331,7 @@ async def baixar_lote_danfse(page, notas: list, download_dir: str):
             arquivos.append(os.path.join(download_dir, f"{chave}.pdf"))
         else:
             falha += 1
+        await page.wait_for_timeout(2000) # Delay de segurança
 
     print(f"✅ Lote DANFSe: {sucesso} ok / {falha} falhas")
     return {"sucesso": sucesso, "falha": falha, "arquivos": arquivos}
