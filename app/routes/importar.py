@@ -96,23 +96,21 @@ async def baixar_xml_individual(req: DownloadRequest):
     if not req.url_download:
         raise HTTPException(status_code=400, detail="url_download ausente")
 
+    # 🔥 CORREÇÃO: certificado obrigatório novamente
+    if not req.certificado_base64:
+        raise HTTPException(status_code=400, detail="Certificado obrigatório")
+
     download_dir = f"/tmp/xml_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
 
-    browser_data = None
-
     try:
-        # 🔥 CORREÇÃO: certificado agora é OPCIONAL
-        if req.certificado_base64:
-            browser_data = await criar_browser_com_certificado(
-                req.certificado_base64,
-                req.certificado_senha
-            )
-        else:
-            # fallback sem certificado
-            browser_data = await criar_browser_com_certificado(None, None)
+        # 🔥 CORREÇÃO: unpack correto
+        p, browser, context, page, cert_path, key_path = await criar_browser_com_certificado(
+            req.certificado_base64,
+            req.certificado_senha
+        )
 
-        ok = await baixar_xml(browser_data["page"], req.dict(), download_dir)
+        ok = await baixar_xml(page, req.dict(), download_dir)
 
         if not ok:
             raise HTTPException(status_code=500, detail="Falha ao baixar XML")
@@ -126,8 +124,11 @@ async def baixar_xml_individual(req: DownloadRequest):
         )
 
     finally:
-        if browser_data:
-            await browser_data["browser"].close()
+        try:
+            await browser.close()
+            await p.stop()
+        except:
+            pass
 
 
 # =========================
@@ -141,10 +142,8 @@ async def baixar_danfse_individual(req: DownloadRequest):
     download_dir = f"/tmp/pdf_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
 
-    browser_data = None
-
     try:
-        browser_data = await criar_browser_com_certificado(
+        p, browser, context, page, cert_path, key_path = await criar_browser_com_certificado(
             req.certificado_base64,
             req.certificado_senha
         )
@@ -152,7 +151,7 @@ async def baixar_danfse_individual(req: DownloadRequest):
         req_dict = req.dict()
         req_dict["data_chave"] = req.chave_acesso
 
-        ok = await baixar_danfse(browser_data["page"], req_dict, download_dir)
+        ok = await baixar_danfse(page, req_dict, download_dir)
 
         if not ok:
             raise HTTPException(status_code=500, detail="Falha ao baixar DANFSE")
@@ -166,8 +165,11 @@ async def baixar_danfse_individual(req: DownloadRequest):
         )
 
     finally:
-        if browser_data:
-            await browser_data["browser"].close()
+        try:
+            await browser.close()
+            await p.stop()
+        except:
+            pass
 
 
 # =========================
@@ -179,25 +181,23 @@ async def baixar_lote_xml_route(req: DownloadLoteRequest):
     if not req.notas or len(req.notas) == 0:
         raise HTTPException(status_code=400, detail="Lista de notas vazia")
 
+    # 🔥 CORREÇÃO: certificado obrigatório
+    if not req.certificado_base64:
+        raise HTTPException(status_code=400, detail="Certificado obrigatório")
+
     download_dir = f"/tmp/lote_xml_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
 
-    browser_data = None
-
     try:
-        # 🔥 CORREÇÃO: certificado opcional
-        if req.certificado_base64:
-            browser_data = await criar_browser_com_certificado(
-                req.certificado_base64,
-                req.certificado_senha
-            )
-        else:
-            browser_data = await criar_browser_com_certificado(None, None)
+        p, browser, context, page, cert_path, key_path = await criar_browser_com_certificado(
+            req.certificado_base64,
+            req.certificado_senha
+        )
 
         arquivos_ok = 0
 
         for nota in req.notas:
-            ok = await baixar_xml(browser_data["page"], nota.dict(), download_dir)
+            ok = await baixar_xml(page, nota.dict(), download_dir)
             if ok:
                 arquivos_ok += 1
             await asyncio.sleep(0.5)
@@ -223,8 +223,11 @@ async def baixar_lote_xml_route(req: DownloadLoteRequest):
         )
 
     finally:
-        if browser_data:
-            await browser_data["browser"].close()
+        try:
+            await browser.close()
+            await p.stop()
+        except:
+            pass
 
 
 # =========================
@@ -235,10 +238,8 @@ async def baixar_lote_danfse_route(req: DownloadLoteRequest):
     download_dir = f"/tmp/lote_pdf_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
 
-    browser_data = None
-
     try:
-        browser_data = await criar_browser_com_certificado(
+        p, browser, context, page, cert_path, key_path = await criar_browser_com_certificado(
             req.certificado_base64,
             req.certificado_senha
         )
@@ -249,7 +250,7 @@ async def baixar_lote_danfse_route(req: DownloadLoteRequest):
             if not n.get("data_chave"):
                 n["data_chave"] = n.get("chave_acesso")
 
-            await baixar_danfse(browser_data["page"], n, download_dir)
+            await baixar_danfse(page, n, download_dir)
             await asyncio.sleep(0.5)
 
         zip_buffer = io.BytesIO()
@@ -270,5 +271,8 @@ async def baixar_lote_danfse_route(req: DownloadLoteRequest):
         )
 
     finally:
-        if browser_data:
-            await browser_data["browser"].close()
+        try:
+            await browser.close()
+            await p.stop()
+        except:
+            pass
