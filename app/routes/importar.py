@@ -1,25 +1,27 @@
+import os
+import sys
+
+# FORÇA O PYTHON A ENXERGAR A RAIZ DO PROJETO
+# Isso garante que 'services' seja encontrado idependente do diretório de execução
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import uuid
 import asyncio
-import os
 import zipfile
 import io
 import shutil
 
-# ============================================================
-# AJUSTE DE IMPORTS (CORREÇÃO PARA O RAILWAY)
-# ============================================================
-# Removido o prefixo "app." para que o Python localize os serviços 
-# corretamente a partir da raiz da aplicação.
+# Imports simplificados (agora que o sys.path foi ajustado)
 try:
     from services.browser_service import criar_browser_com_certificado
     from services.robot_service import baixar_xml, baixar_danfse
     from services.import_service import executar_importacao
 except ImportError:
-    # Caso o ambiente exija o caminho absoluto
+    # Fallback caso ainda usem o prefixo app
     from app.services.browser_service import criar_browser_com_certificado
     from app.services.robot_service import baixar_xml, baixar_danfse
     from app.services.import_service import executar_importacao
@@ -62,10 +64,10 @@ class DownloadLoteRequest(BaseModel):
     certificado_base64: Optional[str] = None
     certificado_senha: Optional[str] = None
 
+# =========================
+# ROTAS
+# =========================
 
-# =========================
-# ROTA: IMPORTAR NOTAS
-# =========================
 @router.post("/importar-notas")
 async def importar_notas(req: ImportRequest):
     job_id = str(uuid.uuid4())
@@ -79,185 +81,81 @@ async def importar_notas(req: ImportRequest):
         "notas_importadas": 0,
         "message": "Na fila de processamento"
     }
-    
-    print(f"📩 Novo job recebido: {job_id}")
-    asyncio.create_task(
-        executar_importacao(job_id, req.dict(), jobs)
-    )
-    return {
-        "job_id": job_id,
-        "status": "queued"
-    }
+    asyncio.create_task(executar_importacao(job_id, req.dict(), jobs))
+    return {"job_id": job_id, "status": "queued"}
 
-
-# =========================
-# ROTA: STATUS DO JOB
-# =========================
 @router.get("/status/{job_id}")
 async def status_job(job_id: str):
-    if job_id not in jobs:
-        return {"job_id": job_id, "status": "not_found"}
-    return jobs[job_id]
+    return jobs.get(job_id, {"job_id": job_id, "status": "not_found"})
 
-
-# =========================
-# ROTA: DOWNLOAD INDIVIDUAL XML
-# =========================
 @router.post("/baixar-xml")
 async def baixar_xml_individual(req: DownloadRequest):
-    if not req.url_download:
-        return {"erro": "url_download não informada"}
-
+    if not req.url_download: return {"erro": "url_download ausente"}
     download_dir = f"/tmp/xml_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
-
     browser_data = None
     try:
-        browser_data = await criar_browser_com_certificado(
-            req.certificado_base64,
-            req.certificado_senha
-        )
-        
-        nota = {
-            "chave_acesso": req.chave_acesso,
-            "url_download": req.url_download
-        }
-        
-        ok = await baixar_xml(browser_data["page"], nota, download_dir)
-        if not ok:
-            return {"erro": "Falha ao baixar XML"}
-
+        browser_data = await criar_browser_com_certificado(req.certificado_base64, req.certificado_senha)
+        ok = await baixar_xml(browser_data["page"], req.dict(), download_dir)
+        if not ok: return {"erro": "Falha ao baixar"}
         caminho = os.path.join(download_dir, f"{req.chave_acesso}.xml")
-        return FileResponse(
-            path=caminho,
-            filename=f"{req.chave_acesso}.xml",
-            media_type="application/xml"
-        )
+        return FileResponse(path=caminho, filename=f"{req.chave_acesso}.xml", media_type="application/xml")
     finally:
-        if browser_data:
-            await browser_data["browser"].close()
+        if browser_data: await browser_data["browser"].close()
 
-
-# =========================
-# ROTA: DOWNLOAD INDIVIDUAL DANFSe
-# =========================
 @router.post("/baixar-danfse")
 async def baixar_danfse_individual(req: DownloadRequest):
-    if not req.url_danfse:
-        return {"erro": "url_danfse não informada"}
-
-    download_dir = f"/tmp/danfse_{uuid.uuid4().hex}"
+    if not req.url_danfse: return {"erro": "url_danfse ausente"}
+    download_dir = f"/tmp/pdf_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
-
     browser_data = None
     try:
-        browser_data = await criar_browser_com_certificado(
-            req.certificado_base64,
-            req.certificado_senha
-        )
-        
-        nota = {
-            "chave_acesso": req.chave_acesso,
-            "url_danfse": req.url_danfse,
-            "data_chave": req.chave_acesso 
-        }
-        
-        ok = await baixar_danfse(browser_data["page"], nota, download_dir)
-        if not ok:
-            return {"erro": "Falha ao baixar DANFSe"}
-
+        browser_data = await criar_browser_com_certificado(req.certificado_base64, req.certificado_senha)
+        req_dict = req.dict()
+        req_dict["data_chave"] = req.chave_acesso # Compatibilidade
+        ok = await baixar_danfse(browser_data["page"], req_dict, download_dir)
+        if not ok: return {"erro": "Falha ao baixar"}
         caminho = os.path.join(download_dir, f"{req.chave_acesso}.pdf")
-        return FileResponse(
-            path=caminho,
-            filename=f"{req.chave_acesso}.pdf",
-            media_type="application/pdf"
-        )
+        return FileResponse(path=caminho, filename=f"{req.chave_acesso}.pdf", media_type="application/pdf")
     finally:
-        if browser_data:
-            await browser_data["browser"].close()
+        if browser_data: await browser_data["browser"].close()
 
-
-# =========================
-# ROTA: DOWNLOAD EM LOTE XML (ZIP)
-# =========================
 @router.post("/baixar-lote-xml")
 async def baixar_lote_xml_route(req: DownloadLoteRequest):
-    if not req.notas:
-        return {"erro": "Lista de notas vazia"}
-
     download_dir = f"/tmp/lote_xml_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
-
     browser_data = None
     try:
-        browser_data = await criar_browser_com_certificado(
-            req.certificado_base64,
-            req.certificado_senha
-        )
-
-        for i, nota in enumerate(req.notas):
-            nota_dict = nota.dict()
-            await baixar_xml(browser_data["page"], nota_dict, download_dir)
+        browser_data = await criar_browser_com_certificado(req.certificado_base64, req.certificado_senha)
+        for nota in req.notas:
+            await baixar_xml(browser_data["page"], nota.dict(), download_dir)
             await asyncio.sleep(1)
-
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for arquivo in os.listdir(download_dir):
-                if arquivo.endswith(".xml"):
-                    zf.write(os.path.join(download_dir, arquivo), arquivo)
-        
+            for f in os.listdir(download_dir): zf.write(os.path.join(download_dir, f), f)
         zip_buffer.seek(0)
         shutil.rmtree(download_dir)
-
-        return StreamingResponse(
-            zip_buffer,
-            media_type="application/zip",
-            headers={"Content-Disposition": f"attachment; filename=notas_xml_{req.cliente_id}.zip"}
-        )
+        return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": f"attachment; filename=xml_{req.cliente_id}.zip"})
     finally:
-        if browser_data:
-            await browser_data["browser"].close()
+        if browser_data: await browser_data["browser"].close()
 
-
-# =========================
-# ROTA: DOWNLOAD EM LOTE DANFSe (ZIP)
-# =========================
 @router.post("/baixar-lote-danfse")
 async def baixar_lote_danfse_route(req: DownloadLoteRequest):
-    if not req.notas:
-        return {"erro": "Lista de notas vazia"}
-
     download_dir = f"/tmp/lote_pdf_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
-
     browser_data = None
     try:
-        browser_data = await criar_browser_com_certificado(
-            req.certificado_base64,
-            req.certificado_senha
-        )
-
-        for i, nota in enumerate(req.notas):
-            nota_dict = nota.dict()
-            if not nota_dict.get("data_chave"):
-                nota_dict["data_chave"] = nota_dict.get("chave_acesso")
-            await baixar_danfse(browser_data["page"], nota_dict, download_dir)
+        browser_data = await criar_browser_com_certificado(req.certificado_base64, req.certificado_senha)
+        for nota in req.notas:
+            n = nota.dict()
+            if not n.get("data_chave"): n["data_chave"] = n.get("chave_acesso")
+            await baixar_danfse(browser_data["page"], n, download_dir)
             await asyncio.sleep(1)
-
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for arquivo in os.listdir(download_dir):
-                if arquivo.endswith(".pdf"):
-                    zf.write(os.path.join(download_dir, arquivo), arquivo)
-        
+            for f in os.listdir(download_dir): zf.write(os.path.join(download_dir, f), f)
         zip_buffer.seek(0)
         shutil.rmtree(download_dir)
-
-        return StreamingResponse(
-            zip_buffer,
-            media_type="application/zip",
-            headers={"Content-Disposition": f"attachment; filename=notas_danfse_{req.cliente_id}.zip"}
-        )
+        return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": f"attachment; filename=danfse_{req.cliente_id}.zip"})
     finally:
-        if browser_data:
-            await browser_data["browser"].close()
+        if browser_data: await browser_data["browser"].close()
