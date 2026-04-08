@@ -190,6 +190,14 @@ async def baixar_xml_individual(req: DownloadRequest):
 # CORREÇÃO: desempacota a tupla corretamente.
 # O shutil.rmtree fica no finally mas APÓS o StreamingResponse
 # ser gerado — por isso copiamos o zip para memória antes.
+#
+# CORREÇÃO ZIP VAZIO (v8): a verificação anterior usava
+# zip_buffer.getbuffer().nbytes == 0, mas um ZIP vazio já
+# ocupa ~22 bytes (cabeçalho), então nunca disparava.
+# Agora verificamos a contagem real de arquivos dentro do ZIP
+# com zipfile.ZipFile(zip_buffer).namelist() antes de retornar.
+# Adicionado também print de debug listando arquivos do diretório
+# para facilitar diagnóstico em caso de falha futura.
 # =========================
 @router.post("/baixar-lote-xml")
 async def baixar_lote_xml_route(req: DownloadLoteRequest):
@@ -222,16 +230,37 @@ async def baixar_lote_xml_route(req: DownloadLoteRequest):
 
         print(f"✅ Lote XML: {sucesso} ok / {falha} falhas")
 
+        # CORREÇÃO ZIP VAZIO: lista os arquivos reais no diretório antes de compactar.
+        # O print de debug mostra exatamente o que foi salvo no disco,
+        # permitindo identificar discrepâncias entre o nome esperado e o salvo.
+        arquivos_no_dir = os.listdir(download_dir)
+        arquivos_xml = [f for f in arquivos_no_dir if f.endswith(".xml")]
+        print(f"📂 Arquivos no diretório ({len(arquivos_xml)} XMLs): {arquivos_xml}")
+
         # Compacta em memória antes do finally limpar o diretório
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for f in os.listdir(download_dir):
-                if f.endswith(".xml"):
-                    zf.write(os.path.join(download_dir, f), f)
+            for f in arquivos_xml:
+                caminho_completo = os.path.join(download_dir, f)
+                zf.write(caminho_completo, f)
+                print(f"  📄 Adicionado ao ZIP: {f} ({os.path.getsize(caminho_completo)} bytes)")
         zip_buffer.seek(0)
 
-        if zip_buffer.getbuffer().nbytes == 0:
-            raise HTTPException(status_code=500, detail="Nenhum XML foi baixado com sucesso")
+        # CORREÇÃO ZIP VAZIO: verifica pelo número de arquivos dentro do ZIP,
+        # não pelo tamanho do buffer (que nunca é 0 mesmo com ZIP vazio).
+        with zipfile.ZipFile(zip_buffer) as zf_check:
+            arquivos_no_zip = zf_check.namelist()
+        zip_buffer.seek(0)  # reposiciona após a verificação
+
+        print(f"📦 Arquivos no ZIP: {arquivos_no_zip}")
+
+        if not arquivos_no_zip:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Nenhum XML foi baixado com sucesso. "
+                       f"Tentativas: {sucesso + falha}, Sucessos: {sucesso}. "
+                       f"Verifique os logs do robô para mais detalhes."
+            )
 
         nome_zip = f"xml_{req.cliente_id}.zip"
         return StreamingResponse(
