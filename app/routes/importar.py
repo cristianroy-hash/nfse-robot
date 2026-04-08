@@ -89,19 +89,12 @@ async def status_job(job_id: str):
 
 
 # =========================
-# DOWNLOAD XML (COM VALIDAÇÃO)
+# DOWNLOAD XML (CORRIGIDO)
 # =========================
 @router.post("/baixar-xml")
 async def baixar_xml_individual(req: DownloadRequest):
     if not req.url_download:
         raise HTTPException(status_code=400, detail="url_download ausente")
-
-    # 🔥 CORREÇÃO PRINCIPAL
-    if not req.certificado_base64:
-        raise HTTPException(
-            status_code=400,
-            detail="Certificado obrigatório para download de XML"
-        )
 
     download_dir = f"/tmp/xml_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
@@ -109,10 +102,15 @@ async def baixar_xml_individual(req: DownloadRequest):
     browser_data = None
 
     try:
-        browser_data = await criar_browser_com_certificado(
-            req.certificado_base64,
-            req.certificado_senha
-        )
+        # 🔥 CORREÇÃO: certificado agora é OPCIONAL
+        if req.certificado_base64:
+            browser_data = await criar_browser_com_certificado(
+                req.certificado_base64,
+                req.certificado_senha
+            )
+        else:
+            # fallback sem certificado
+            browser_data = await criar_browser_com_certificado(None, None)
 
         ok = await baixar_xml(browser_data["page"], req.dict(), download_dir)
 
@@ -133,7 +131,7 @@ async def baixar_xml_individual(req: DownloadRequest):
 
 
 # =========================
-# DOWNLOAD DANFSE (SEM CERTIFICADO)
+# DOWNLOAD DANFSE (SEM ALTERAÇÃO)
 # =========================
 @router.post("/baixar-danfse")
 async def baixar_danfse_individual(req: DownloadRequest):
@@ -173,16 +171,13 @@ async def baixar_danfse_individual(req: DownloadRequest):
 
 
 # =========================
-# LOTE XML (COM VALIDAÇÃO)
+# LOTE XML (CORRIGIDO)
 # =========================
 @router.post("/baixar-lote-xml")
 async def baixar_lote_xml_route(req: DownloadLoteRequest):
 
-    if not req.certificado_base64:
-        raise HTTPException(
-            status_code=400,
-            detail="Certificado obrigatório para download em lote de XML"
-        )
+    if not req.notas or len(req.notas) == 0:
+        raise HTTPException(status_code=400, detail="Lista de notas vazia")
 
     download_dir = f"/tmp/lote_xml_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
@@ -190,14 +185,25 @@ async def baixar_lote_xml_route(req: DownloadLoteRequest):
     browser_data = None
 
     try:
-        browser_data = await criar_browser_com_certificado(
-            req.certificado_base64,
-            req.certificado_senha
-        )
+        # 🔥 CORREÇÃO: certificado opcional
+        if req.certificado_base64:
+            browser_data = await criar_browser_com_certificado(
+                req.certificado_base64,
+                req.certificado_senha
+            )
+        else:
+            browser_data = await criar_browser_com_certificado(None, None)
+
+        arquivos_ok = 0
 
         for nota in req.notas:
-            await baixar_xml(browser_data["page"], nota.dict(), download_dir)
+            ok = await baixar_xml(browser_data["page"], nota.dict(), download_dir)
+            if ok:
+                arquivos_ok += 1
             await asyncio.sleep(0.5)
+
+        if arquivos_ok == 0:
+            raise HTTPException(status_code=500, detail="Nenhum XML baixado")
 
         zip_buffer = io.BytesIO()
 
