@@ -13,9 +13,9 @@ import shutil
 # =========================
 # IMPORTS (PADRONIZADOS)
 # =========================
-from app.services.browser_service import criar_browser_com_certificado
-from app.services.robot_service import baixar_xml, baixar_danfse
-from app.services.import_service import executar_importacao
+from app.robot.browser import criar_browser_com_certificado
+from app.robot.consultar import baixar_xml, baixar_danfse
+from app.services.import_service import executar_importacao 
 
 router = APIRouter()
 
