@@ -9,15 +9,17 @@ import zipfile
 import io
 import shutil
 
-# IMPORTANTE: Usando imports relativos para evitar ModuleNotFoundError no Railway
-# Se estes arquivos estão na mesma estrutura de pastas (app/services/...),
-# o uso do "from ..services" garante que o Python suba um nível e encontre a pasta services.
+# ============================================================
+# AJUSTE DE IMPORTS (CORREÇÃO PARA O RAILWAY)
+# ============================================================
+# Removido o prefixo "app." para que o Python localize os serviços 
+# corretamente a partir da raiz da aplicação.
 try:
-    from ..services.browser_service import criar_browser_com_certificado
-    from ..services.robot_service import baixar_xml, baixar_danfse
-    from ..services.import_service import executar_importacao
+    from services.browser_service import criar_browser_com_certificado
+    from services.robot_service import baixar_xml, baixar_danfse
+    from services.import_service import executar_importacao
 except ImportError:
-    # Fallback caso a estrutura de execução mude
+    # Caso o ambiente exija o caminho absoluto
     from app.services.browser_service import criar_browser_com_certificado
     from app.services.robot_service import baixar_xml, baixar_danfse
     from app.services.import_service import executar_importacao
@@ -60,11 +62,12 @@ class DownloadLoteRequest(BaseModel):
     certificado_base64: Optional[str] = None
     certificado_senha: Optional[str] = None
 
+
 # =========================
 # ROTA: IMPORTAR NOTAS
 # =========================
 @router.post("/importar-notas")
-async def importar_notas_route(req: ImportRequest):
+async def importar_notas(req: ImportRequest):
     job_id = str(uuid.uuid4())
     jobs[job_id] = {
         "job_id": job_id,
@@ -86,6 +89,7 @@ async def importar_notas_route(req: ImportRequest):
         "status": "queued"
     }
 
+
 # =========================
 # ROTA: STATUS DO JOB
 # =========================
@@ -94,6 +98,7 @@ async def status_job(job_id: str):
     if job_id not in jobs:
         return {"job_id": job_id, "status": "not_found"}
     return jobs[job_id]
+
 
 # =========================
 # ROTA: DOWNLOAD INDIVIDUAL XML
@@ -108,7 +113,6 @@ async def baixar_xml_individual(req: DownloadRequest):
 
     browser_data = None
     try:
-        # Chama a função importada no topo
         browser_data = await criar_browser_com_certificado(
             req.certificado_base64,
             req.certificado_senha
@@ -132,6 +136,7 @@ async def baixar_xml_individual(req: DownloadRequest):
     finally:
         if browser_data:
             await browser_data["browser"].close()
+
 
 # =========================
 # ROTA: DOWNLOAD INDIVIDUAL DANFSe
@@ -170,6 +175,7 @@ async def baixar_danfse_individual(req: DownloadRequest):
     finally:
         if browser_data:
             await browser_data["browser"].close()
+
 
 # =========================
 # ROTA: DOWNLOAD EM LOTE XML (ZIP)
@@ -211,6 +217,7 @@ async def baixar_lote_xml_route(req: DownloadLoteRequest):
     finally:
         if browser_data:
             await browser_data["browser"].close()
+
 
 # =========================
 # ROTA: DOWNLOAD EM LOTE DANFSe (ZIP)
