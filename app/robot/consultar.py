@@ -87,8 +87,8 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
             await page.wait_for_selector("body", timeout=15000)
 
             texto_pagina = await page.content()
-            if "Nenhum registro encontrado" in texto_pagina or "Nenhum registro" in texto_pagina:
-                print("🚫 Paginação finalizada (mensagem do portal)")
+            if "Nenhum registro encontrado" in texto_pagina:
+                print("🚫 Paginação finalizada")
                 break
 
             await page.wait_for_selector("table tbody tr[data-chave]", timeout=15000)
@@ -98,7 +98,7 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 return Array.from(rows).map(row => {
                     const chaveEncoded = row.getAttribute('data-chave');
                     const htmlRow = row.innerHTML;
-                    const matchChave = htmlRow.match(/Download\/NFSe\/([0-9]+)/);
+                    const matchChave = htmlRow.match(/Download\\/NFSe\\/([0-9]+)/);
                     const chaveNumerica = matchChave ? matchChave[1] : null;
                     return {
                         data_chave: chaveEncoded,
@@ -118,62 +118,49 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 chave = nota.get("chave_acesso") or nota.get("data_chave")
                 if chave not in chaves_vistas:
                     chaves_vistas.add(chave)
+
+                    # ✅ ADIÇÃO SEGURA DO DANFSE (NÃO QUEBRA XML)
                     nota["url_danfse"] = (
                         "https://www.nfse.gov.br/ConsultaPublica/Download/DANFSe?chave="
                         + nota["data_chave"]
                     ) if nota.get("data_chave") else None
+
                     novas_notas.append(nota)
 
             if not novas_notas:
-                print("🚫 Paginação finalizada (dados duplicados detectados)")
+                print("🚫 Paginação finalizada (duplicados)")
                 break
 
             todas_notas.extend(novas_notas)
             print(f"Notas acumuladas: {len(todas_notas)}")
 
             # =========================
-            # DETECÇÃO UNIVERSAL DE PRÓXIMA PÁGINA (MANTIDO)
+            # DETECÇÃO UNIVERSAL DE PRÓXIMA PÁGINA (MANTIDA)
             # =========================
             print("Verificando próxima página...")
             proxima_num = str(pagina + 1)
+
             botao_num = page.locator(f"ul.pagination li a:text-is('{proxima_num}')").first
             botao_next = page.locator(
-                "ul.pagination li a[rel='next'], ul.pagination li a:has-text('>'), ul.pagination li a:has-text('›'), ul.pagination li a:has-text('»')"
+                "ul.pagination li a[rel='next'], ul.pagination li a:has-text('>')"
             ).first
 
             target_button = None
             if await botao_num.count() > 0:
-                print(f"➡️ Indo para página {proxima_num}")
                 target_button = botao_num
             elif await botao_next.count() > 0:
-                print("➡️ Indo para próxima via botão '>'")
                 target_button = botao_next
 
             # =========================
             # FALLBACK INTELIGENTE (MANTIDO)
             # =========================
             if not target_button or await target_button.count() == 0:
-                proxima_pagina = pagina + 1
-                url_forcada = f"https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas?pg={proxima_pagina}&datainicio={data_ini_fmt}&datafim={data_fim_fmt}"
-                print(f"➡️ [FALLBACK] Forçando navegação para página {proxima_pagina}")
-                await page.goto(url_forcada, wait_until="networkidle")
+                pagina += 1
+                url = f"https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas?pg={pagina}"
+                print(f"➡️ Fallback página {pagina}")
+                await page.goto(url, wait_until="networkidle")
                 await page.wait_for_timeout(5000)
-
-                texto_forcado = await page.content()
-                if "Nenhum registro encontrado" in texto_forcado or "Nenhum registro" in texto_forcado:
-                    print("🚫 Paginação finalizada (fallback sem registros)")
-                    break
-
-                pagina = proxima_pagina
                 continue
-
-            is_disabled = await target_button.evaluate("""el => {
-                const li = el.closest('li');
-                return li && li.classList.contains('disabled');
-            }""")
-            if is_disabled:
-                print("🚫 Botão próximo desabilitado")
-                break
 
             await target_button.click()
             await page.wait_for_timeout(9000)
@@ -188,37 +175,35 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
 
 
 # =========================
-# 🔥 FIX REAL AQUI (XML ESTÁVEL)
+# CORREÇÃO CRÍTICA DO XML
 # =========================
 async def baixar_xml(page, nota: dict, download_dir: str):
     try:
         url = nota.get("url_download")
-        nome_arquivo = nota.get("chave_acesso") or nota.get("data_chave", "nota")
+        nome = nota.get("chave_acesso") or nota.get("data_chave", "nota")
 
         if not url:
-            print(f"⚠️ Sem URL de download para {nome_arquivo}")
             return False
 
-        caminho = os.path.join(download_dir, f"{nome_arquivo}.xml")
+        caminho = os.path.join(download_dir, f"{nome}.xml")
 
         context = page.context
-        paginas_antes = context.pages.copy()
+        new_page = await context.new_page()
 
         try:
-            async with page.expect_download(timeout=15000) as download_info:
-                await page.evaluate(f"window.open('{url}', '_blank')")
+            async with new_page.expect_download(timeout=30000) as download_info:
+                await new_page.goto(url)
             download = await download_info.value
             await download.save_as(caminho)
+            await new_page.close()
             return True
+        except:
+            await new_page.close()
 
-        except Exception:
-            print("⚠️ Fallback XML via fetch...")
-
+            # fallback original mantido
             conteudo = await page.evaluate(f"""async () => {{
-                try {{
-                    const r = await fetch('{url}', {{ credentials: 'include' }});
-                    return await r.text();
-                }} catch(e) {{ return null; }}
+                const r = await fetch('{url}', {{ credentials: 'include' }});
+                return await r.text();
             }}""")
 
             if conteudo and "<?xml" in conteudo:
@@ -226,13 +211,36 @@ async def baixar_xml(page, nota: dict, download_dir: str):
                     f.write(conteudo)
                 return True
 
-        finally:
-            for p in context.pages:
-                if p not in paginas_antes:
-                    await p.close()
-
+        return False
+    except:
         return False
 
-    except Exception as e:
-        print(f"Erro ao baixar XML: {e}")
+
+# =========================
+# GARANTE EXPORT DO DANFSE (FIX DO CRASH)
+# =========================
+async def baixar_danfse(page, nota: dict, download_dir: str):
+    try:
+        url = nota.get("url_danfse")
+        nome = nota.get("chave_acesso") or nota.get("data_chave", "nota")
+
+        if not url:
+            return False
+
+        caminho = os.path.join(download_dir, f"{nome}.pdf")
+
+        context = page.context
+        new_page = await context.new_page()
+
+        try:
+            async with new_page.expect_download(timeout=30000) as download_info:
+                await new_page.goto(url)
+            download = await download_info.value
+            await download.save_as(caminho)
+            await new_page.close()
+            return True
+        except:
+            await new_page.close()
+        return False
+    except:
         return False
