@@ -8,6 +8,12 @@ from cryptography.hazmat.primitives.serialization import pkcs12, Encoding, Priva
 async def criar_browser_com_certificado(certificado_base64: str, senha: str):
     print("🔐 Preparando certificado...")
 
+    # 🔥 CORREÇÃO
+    if not certificado_base64:
+        raise Exception("Certificado não informado para criação do browser")
+
+    cert_bytes = base64.b64decode(certificado_base64)
+
     # ================================
     # 1. DECODIFICA CERTIFICADO
     # ================================
