@@ -12,14 +12,11 @@ import shutil
 # ============================================================
 # IMPORTS (CORRIGIDOS PARA ESTRUTURA DE PASTAS E RAILWAY)
 # ============================================================
-# Usamos ".." para subir um nível a partir de app/routes e 
-# acessar as pastas irmãs robot e services.
 try:
     from ..robot.browser import criar_browser_com_certificado
     from ..robot.consultar import baixar_xml, baixar_danfse
     from ..services.import_service import executar_importacao
 except (ImportError, ValueError):
-    # Fallback caso seja executado de uma forma que impeça import relativo
     from app.robot.browser import criar_browser_com_certificado
     from app.robot.consultar import baixar_xml, baixar_danfse
     from app.services.import_service import executar_importacao
@@ -69,6 +66,7 @@ class DownloadLoteRequest(BaseModel):
 @router.post("/importar-notas")
 async def importar_notas(req: ImportRequest):
     job_id = str(uuid.uuid4())
+
     jobs[job_id] = {
         "job_id": job_id,
         "status": "queued",
@@ -90,10 +88,20 @@ async def status_job(job_id: str):
     return jobs.get(job_id, {"job_id": job_id, "status": "not_found"})
 
 
+# =========================
+# DOWNLOAD XML (COM VALIDAÇÃO)
+# =========================
 @router.post("/baixar-xml")
 async def baixar_xml_individual(req: DownloadRequest):
     if not req.url_download:
         raise HTTPException(status_code=400, detail="url_download ausente")
+
+    # 🔥 CORREÇÃO PRINCIPAL
+    if not req.certificado_base64:
+        raise HTTPException(
+            status_code=400,
+            detail="Certificado obrigatório para download de XML"
+        )
 
     download_dir = f"/tmp/xml_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
@@ -124,6 +132,9 @@ async def baixar_xml_individual(req: DownloadRequest):
             await browser_data["browser"].close()
 
 
+# =========================
+# DOWNLOAD DANFSE (SEM CERTIFICADO)
+# =========================
 @router.post("/baixar-danfse")
 async def baixar_danfse_individual(req: DownloadRequest):
     if not req.url_danfse:
@@ -141,7 +152,7 @@ async def baixar_danfse_individual(req: DownloadRequest):
         )
 
         req_dict = req.dict()
-        req_dict["data_chave"] = req.chave_acesso  # Compatibilidade
+        req_dict["data_chave"] = req.chave_acesso
 
         ok = await baixar_danfse(browser_data["page"], req_dict, download_dir)
 
@@ -161,8 +172,18 @@ async def baixar_danfse_individual(req: DownloadRequest):
             await browser_data["browser"].close()
 
 
+# =========================
+# LOTE XML (COM VALIDAÇÃO)
+# =========================
 @router.post("/baixar-lote-xml")
 async def baixar_lote_xml_route(req: DownloadLoteRequest):
+
+    if not req.certificado_base64:
+        raise HTTPException(
+            status_code=400,
+            detail="Certificado obrigatório para download em lote de XML"
+        )
+
     download_dir = f"/tmp/lote_xml_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
 
@@ -176,7 +197,7 @@ async def baixar_lote_xml_route(req: DownloadLoteRequest):
 
         for nota in req.notas:
             await baixar_xml(browser_data["page"], nota.dict(), download_dir)
-            await asyncio.sleep(0.5) 
+            await asyncio.sleep(0.5)
 
         zip_buffer = io.BytesIO()
 
@@ -200,6 +221,9 @@ async def baixar_lote_xml_route(req: DownloadLoteRequest):
             await browser_data["browser"].close()
 
 
+# =========================
+# LOTE DANFSE (SEM ALTERAÇÃO)
+# =========================
 @router.post("/baixar-lote-danfse")
 async def baixar_lote_danfse_route(req: DownloadLoteRequest):
     download_dir = f"/tmp/lote_pdf_{uuid.uuid4().hex}"
@@ -220,7 +244,7 @@ async def baixar_lote_danfse_route(req: DownloadLoteRequest):
                 n["data_chave"] = n.get("chave_acesso")
 
             await baixar_danfse(browser_data["page"], n, download_dir)
-            await asyncio.sleep(0.5) 
+            await asyncio.sleep(0.5)
 
         zip_buffer = io.BytesIO()
 
