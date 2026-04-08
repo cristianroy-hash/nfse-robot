@@ -1,5 +1,4 @@
 import os
-
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -10,12 +9,20 @@ import zipfile
 import io
 import shutil
 
-# =========================
-# IMPORTS (PADRONIZADOS)
-# =========================
-from app.robot.browser import criar_browser_com_certificado
-from app.robot.consultar import baixar_xml, baixar_danfse
-from app.services.import_service import executar_importacao 
+# ============================================================
+# IMPORTS (CORRIGIDOS PARA ESTRUTURA DE PASTAS E RAILWAY)
+# ============================================================
+# Usamos ".." para subir um nível a partir de app/routes e 
+# acessar as pastas irmãs robot e services.
+try:
+    from ..robot.browser import criar_browser_com_certificado
+    from ..robot.consultar import baixar_xml, baixar_danfse
+    from ..services.import_service import executar_importacao
+except (ImportError, ValueError):
+    # Fallback caso seja executado de uma forma que impeça import relativo
+    from app.robot.browser import criar_browser_com_certificado
+    from app.robot.consultar import baixar_xml, baixar_danfse
+    from app.services.import_service import executar_importacao
 
 router = APIRouter()
 
@@ -169,7 +176,7 @@ async def baixar_lote_xml_route(req: DownloadLoteRequest):
 
         for nota in req.notas:
             await baixar_xml(browser_data["page"], nota.dict(), download_dir)
-            await asyncio.sleep(0.5)  # leve melhoria de performance
+            await asyncio.sleep(0.5) 
 
         zip_buffer = io.BytesIO()
 
@@ -213,7 +220,7 @@ async def baixar_lote_danfse_route(req: DownloadLoteRequest):
                 n["data_chave"] = n.get("chave_acesso")
 
             await baixar_danfse(browser_data["page"], n, download_dir)
-            await asyncio.sleep(0.5)  # leve melhoria
+            await asyncio.sleep(0.5) 
 
         zip_buffer = io.BytesIO()
 
