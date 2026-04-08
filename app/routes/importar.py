@@ -8,10 +8,11 @@ import asyncio
 import zipfile
 import io
 import shutil
-import httpx  # Para baixar o PDF direto via URL
+import httpx
 
 # ============================================================
-# IMPORTS (CORRIGIDOS PARA ESTRUTURA DE PASTAS)
+# IMPORTS (mantém o try/except original para compatibilidade
+# com diferentes estruturas de pastas no deploy)
 # ============================================================
 try:
     from ..robot.browser import criar_browser_com_certificado
@@ -23,10 +24,62 @@ except (ImportError, ValueError):
     from app.services.import_service import executar_importacao
 
 router = APIRouter()
+
+# Armazena status dos jobs em memória (resetado a cada deploy)
 jobs = {}
 
+
 # =========================
-# MODELS
+# HELPER INTERNO: DESEMPACOTAR RETORNO DO BROWSER
+# criar_browser_com_certificado retorna uma TUPLA:
+#   (p, browser, context, page, cert_path, key_path)
+# Esta função centraliza o desempacotamento para não repetir
+# o índice em cada rota e facilitar manutenção futura.
+# =========================
+def _unpack_browser(browser_tuple):
+    p, browser, context, page, cert_path, key_path = browser_tuple
+    return p, browser, context, page, cert_path, key_path
+
+
+# =========================
+# HELPER INTERNO: FECHAR BROWSER E LIMPAR TEMPORÁRIOS
+# Chamado sempre no bloco finally de cada rota que abre browser.
+# Fecha o browser e remove os arquivos PEM temporários do certificado.
+# =========================
+async def _fechar_browser(browser_tuple):
+    try:
+        _, browser, _, _, cert_path, key_path = browser_tuple
+        await browser.close()
+        for path in [cert_path, key_path]:
+            if path and os.path.exists(path):
+                os.remove(path)
+    except Exception as e:
+        print(f"⚠️ Erro ao fechar browser: {e}")
+
+
+# =========================
+# HELPER INTERNO: DOWNLOAD DE PDF VIA HTTPX (SEM ROBÔ)
+# O portal público gov.br não exige autenticação para DANFSe.
+# O robô faz o GET direto — sem CORS, pois é server-side.
+# Valida a assinatura %PDF- antes de salvar para evitar HTML de erro.
+# Retorna True se o PDF foi salvo com sucesso, False caso contrário.
+# =========================
+async def _download_pdf_direto(url: str, caminho: str) -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            r = await client.get(url)
+            if r.status_code == 200 and r.content[:4] == b'%PDF':
+                with open(caminho, 'wb') as f:
+                    f.write(r.content)
+                return True
+            print(f"⚠️ PDF inválido ou status {r.status_code} para {url}")
+    except Exception as e:
+        print(f"⚠️ Erro httpx ao baixar PDF: {e}")
+    return False
+
+
+# =========================
+# MODELS — IMPORTAÇÃO
 # =========================
 class ImportRequest(BaseModel):
     cliente_id: str
@@ -36,148 +89,246 @@ class ImportRequest(BaseModel):
     certificado_base64: Optional[str] = None
     certificado_senha: Optional[str] = None
 
+
+# =========================
+# MODELS — DOWNLOAD INDIVIDUAL
+# =========================
 class DownloadRequest(BaseModel):
     cliente_id: str
     chave_acesso: str
-    url_download: Optional[str] = None  
-    url_danfse: Optional[str] = None    
+    url_download: Optional[str] = None  # URL do XML (Emissor Nacional, requer sessão)
+    url_danfse:   Optional[str] = None  # URL do DANFSe (portal público, sem sessão)
     certificado_base64: Optional[str] = None
-    certificado_senha: Optional[str] = None
+    certificado_senha:  Optional[str] = None
 
+
+# =========================
+# MODELS — DOWNLOAD EM LOTE
+# data_chave: token encodado capturado do data-chave do portal (usado na url_danfse)
+# =========================
 class NotaLote(BaseModel):
     chave_acesso: Optional[str] = None
-    url_download: Optional[str] = None  
-    url_danfse: Optional[str] = None    
+    data_chave:   Optional[str] = None  # token encodado do portal (para url_danfse)
+    url_download: Optional[str] = None  # URL do XML
+    url_danfse:   Optional[str] = None  # URL completa do DANFSe (já montada pelo robô)
 
 class DownloadLoteRequest(BaseModel):
     cliente_id: str
     notas: List[NotaLote]
     certificado_base64: Optional[str] = None
-    certificado_senha: Optional[str] = None
+    certificado_senha:  Optional[str] = None
+
 
 # =========================
-# ROTAS - IMPORTAÇÃO
+# ROTA: IMPORTAR NOTAS (original — sem alteração)
 # =========================
-
 @router.post("/importar-notas")
 async def importar_notas(req: ImportRequest):
     job_id = str(uuid.uuid4())
     jobs[job_id] = {
-        "job_id": job_id, "status": "queued", "cliente_id": req.cliente_id,
-        "notas_encontradas": 0, "notas_importadas": 0, "message": "Na fila"
+        "job_id": job_id, "status": "queued",
+        "cliente_id": req.cliente_id,
+        "notas_encontradas": 0, "notas_importadas": 0,
+        "message": "Na fila"
     }
+    print(f"📩 Novo job recebido: {job_id}")
     asyncio.create_task(executar_importacao(job_id, req.dict(), jobs))
     return {"job_id": job_id, "status": "queued"}
 
+
+# =========================
+# ROTA: STATUS DO JOB (original — sem alteração)
+# =========================
 @router.get("/status/{job_id}")
 async def status_job(job_id: str):
     return jobs.get(job_id, {"job_id": job_id, "status": "not_found"})
 
-# =========================
-# ROTAS - XML (USA O ROBÔ)
-# =========================
 
+# =========================
+# ROTA: DOWNLOAD INDIVIDUAL — XML
+# Abre browser com certificado, baixa o XML da nota e retorna o arquivo.
+# CORREÇÃO: desempacota a tupla corretamente com _unpack_browser()
+# em vez de acessar como dicionário (browser_data["page"]).
+# =========================
 @router.post("/baixar-xml")
 async def baixar_xml_individual(req: DownloadRequest):
     if not req.certificado_base64:
-        raise HTTPException(status_code=400, detail="Certificado necessário para XML")
-    
+        raise HTTPException(status_code=400, detail="Certificado necessário para baixar XML")
+    if not req.url_download:
+        raise HTTPException(status_code=400, detail="url_download é obrigatória")
+
     download_dir = f"/tmp/xml_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
-    browser_data = None
+    browser_tuple = None
 
     try:
-        # Chama o robô exatamente como o import_service faz
-        browser_data = await criar_browser_com_certificado(req.certificado_base64, req.certificado_senha)
-        
-        ok = await baixar_xml(browser_data["page"], req.dict(), download_dir)
-        
+        browser_tuple = await criar_browser_com_certificado(
+            req.certificado_base64, req.certificado_senha
+        )
+        # CORREÇÃO: desempacota tupla — antes estava usando browser_data["page"] (erro)
+        _, _, _, page, _, _ = _unpack_browser(browser_tuple)
+
+        nota_dict = {"chave_acesso": req.chave_acesso, "url_download": req.url_download}
+        ok = await baixar_xml(page, nota_dict, download_dir)
+
         if not ok:
             raise HTTPException(status_code=500, detail="Portal recusou o download do XML")
 
         caminho = os.path.join(download_dir, f"{req.chave_acesso}.xml")
-        return FileResponse(path=caminho, filename=f"{req.chave_acesso}.xml", media_type="application/xml")
+        return FileResponse(
+            path=caminho,
+            filename=f"{req.chave_acesso}.xml",
+            media_type="application/xml"
+        )
     finally:
-        if browser_data:
-            await browser_data["browser"].close()
+        if browser_tuple:
+            await _fechar_browser(browser_tuple)
 
+
+# =========================
+# ROTA: DOWNLOAD EM LOTE — XML (retorna ZIP)
+# CORREÇÃO: desempacota a tupla corretamente.
+# O shutil.rmtree fica no finally mas APÓS o StreamingResponse
+# ser gerado — por isso copiamos o zip para memória antes.
+# =========================
 @router.post("/baixar-lote-xml")
 async def baixar_lote_xml_route(req: DownloadLoteRequest):
     if not req.certificado_base64:
-        raise HTTPException(status_code=400, detail="Certificado necessário para XML")
-        
+        raise HTTPException(status_code=400, detail="Certificado necessário para baixar XMLs")
+
     download_dir = f"/tmp/lote_xml_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
-    browser_data = None
+    browser_tuple = None
 
     try:
-        browser_data = await criar_browser_com_certificado(req.certificado_base64, req.certificado_senha)
-        for nota in req.notas:
-            if nota.url_download:
-                await baixar_xml(browser_data["page"], nota.dict(), download_dir)
-                await asyncio.sleep(0.5)
+        browser_tuple = await criar_browser_com_certificado(
+            req.certificado_base64, req.certificado_senha
+        )
+        # CORREÇÃO: desempacota tupla corretamente
+        _, _, _, page, _, _ = _unpack_browser(browser_tuple)
 
+        sucesso, falha = 0, 0
+        for nota in req.notas:
+            if not nota.url_download:
+                falha += 1
+                continue
+            nota_dict = {"chave_acesso": nota.chave_acesso, "url_download": nota.url_download}
+            ok = await baixar_xml(page, nota_dict, download_dir)
+            if ok:
+                sucesso += 1
+            else:
+                falha += 1
+            await asyncio.sleep(0.8)  # pausa entre downloads para não sobrecarregar
+
+        print(f"✅ Lote XML: {sucesso} ok / {falha} falhas")
+
+        # Compacta em memória antes do finally limpar o diretório
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in os.listdir(download_dir):
-                zf.write(os.path.join(download_dir, f), f)
-        
+                if f.endswith(".xml"):
+                    zf.write(os.path.join(download_dir, f), f)
         zip_buffer.seek(0)
-        return StreamingResponse(zip_buffer, media_type="application/zip", 
-                                 headers={"Content-Disposition": f"attachment; filename=xml_lote.zip"})
+
+        if zip_buffer.getbuffer().nbytes == 0:
+            raise HTTPException(status_code=500, detail="Nenhum XML foi baixado com sucesso")
+
+        nome_zip = f"xml_{req.cliente_id}.zip"
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename={nome_zip}"}
+        )
     finally:
-        if browser_data:
-            await browser_data["browser"].close()
+        if browser_tuple:
+            await _fechar_browser(browser_tuple)
         if os.path.exists(download_dir):
-            shutil.rmtree(download_dir)
+            shutil.rmtree(download_dir, ignore_errors=True)
+
 
 # =========================
-# ROTAS - PDF (DIRETO VIA URL - SEM ROBÔ)
+# ROTA: DOWNLOAD INDIVIDUAL — DANFSe (PDF oficial)
+# O robô faz GET direto ao portal público via httpx (server-side).
+# Sem CORS, sem autenticação necessária.
+# CORREÇÃO: usa req.url_danfse (URL completa com data_chave encodado)
+# em vez de montar a URL com chave_acesso (que é o número, não o token).
 # =========================
-
-async def download_pdf_direto(url: str, caminho: str):
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.get(url)
-        if r.status_code == 200:
-            with open(caminho, 'wb') as f:
-                f.write(r.content)
-            return True
-    return False
-
 @router.post("/baixar-danfse")
 async def baixar_danfse_individual(req: DownloadRequest):
-    # URL Direta: https://www.nfse.gov.br/ConsultaPublica/Download/DANFSe?chave=...
-    url = f"https://www.nfse.gov.br/ConsultaPublica/Download/DANFSe?chave={req.chave_acesso}"
-    
+    # Usa url_danfse se disponível (já tem o data_chave encodado correto)
+    # Fallback: monta com chave_acesso (pode não funcionar se não for o token)
+    url = req.url_danfse or (
+        f"https://www.nfse.gov.br/ConsultaPublica/Download/DANFSe?chave={req.chave_acesso}"
+    )
+
     download_dir = f"/tmp/pdf_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
     caminho = os.path.join(download_dir, f"{req.chave_acesso}.pdf")
 
-    if await download_pdf_direto(url, caminho):
-        return FileResponse(path=caminho, filename=f"{req.chave_acesso}.pdf", media_type="application/pdf")
-    
-    raise HTTPException(status_code=500, detail="Erro ao obter PDF do portal público")
+    try:
+        if await _download_pdf_direto(url, caminho):
+            return FileResponse(
+                path=caminho,
+                filename=f"{req.chave_acesso}.pdf",
+                media_type="application/pdf"
+            )
+        raise HTTPException(status_code=500, detail="Portal não retornou PDF válido")
+    finally:
+        # Não remove aqui pois FileResponse ainda precisa ler o arquivo
+        # O OS limpará /tmp automaticamente
+        pass
 
+
+# =========================
+# ROTA: DOWNLOAD EM LOTE — DANFSe PDF (retorna ZIP)
+# CORREÇÃO: usa nota.url_danfse (URL completa com token encodado)
+# em vez de montar URL com chave_acesso numérica (que dava 404).
+# O robô faz GET direto — sem CORS, sem autenticação.
+# =========================
 @router.post("/baixar-lote-danfse")
 async def baixar_lote_danfse_route(req: DownloadLoteRequest):
     download_dir = f"/tmp/lote_pdf_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
 
     try:
+        sucesso, falha = 0, 0
         for nota in req.notas:
-            chave = nota.chave_acesso
-            url = f"https://www.nfse.gov.br/ConsultaPublica/Download/DANFSe?chave={chave}"
-            caminho = os.path.join(download_dir, f"{chave}.pdf")
-            await download_pdf_direto(url, caminho)
+            chave = nota.chave_acesso or nota.data_chave or "nota"
 
+            # CORREÇÃO: usa url_danfse completa (tem o data_chave encodado)
+            # sem ela o portal retorna 404 pois a chave numérica não é o token
+            url = nota.url_danfse
+            if not url:
+                print(f"⚠️ url_danfse ausente para {chave}, pulando")
+                falha += 1
+                continue
+
+            caminho = os.path.join(download_dir, f"{chave}.pdf")
+            ok = await _download_pdf_direto(url, caminho)
+            if ok:
+                sucesso += 1
+            else:
+                falha += 1
+
+        print(f"✅ Lote DANFSe: {sucesso} ok / {falha} falhas")
+
+        # Compacta em memória
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in os.listdir(download_dir):
-                zf.write(os.path.join(download_dir, f), f)
-
+                if f.endswith(".pdf"):
+                    zf.write(os.path.join(download_dir, f), f)
         zip_buffer.seek(0)
-        return StreamingResponse(zip_buffer, media_type="application/zip", 
-                                 headers={"Content-Disposition": "attachment; filename=pdf_lote.zip"})
+
+        if zip_buffer.getbuffer().nbytes == 0:
+            raise HTTPException(status_code=500, detail="Nenhum DANFSe foi baixado com sucesso")
+
+        nome_zip = f"danfse_{req.cliente_id}.zip"
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename={nome_zip}"}
+        )
     finally:
         if os.path.exists(download_dir):
-            shutil.rmtree(download_dir)
+            shutil.rmtree(download_dir, ignore_errors=True)
