@@ -79,6 +79,60 @@ async def _download_pdf_direto(url: str, caminho: str) -> bool:
 
 
 # =========================
+# HELPER INTERNO: AQUECER SESSÃO NO PORTAL
+# Problema identificado no lote XML: o browser é criado do zero
+# (sem histórico de sessão) e vai direto ao download sem login.
+# O baixar_xml usa fetch com credentials:'include', mas sem uma
+# sessão ativa no portal o servidor retorna HTML de login, não XML.
+# Esta função navega para o portal e aguarda o login via certificado
+# — exatamente como o import_service faz antes de qualquer download.
+# Retorna True se a sessão foi estabelecida, False caso contrário.
+# =========================
+async def _aquecer_sessao(page) -> bool:
+    try:
+        print("🔐 Aquecendo sessão no portal NFS-e...")
+        await page.goto(
+            "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
+            wait_until="networkidle",
+            timeout=90000
+        )
+        await page.wait_for_timeout(5000)
+
+        # Se redirecionou para login, clica no botão de certificado
+        if await page.locator("#datainicio").count() == 0:
+            print(f"↪️ Redirecionado para login. URL: {page.url}")
+            btn_cert = page.locator(
+                "a[href*='Certificado'], button:has-text('Certificado')"
+            ).first
+            if await btn_cert.count() > 0:
+                print("🖱️ Clicando em autenticar com Certificado...")
+                await btn_cert.click()
+                await page.wait_for_timeout(8000)
+                # Redireciona novamente para a página de notas após login
+                await page.goto(
+                    "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
+                    wait_until="networkidle",
+                    timeout=60000
+                )
+                await page.wait_for_timeout(3000)
+            else:
+                print("❌ Botão de certificado não encontrado na tela de login")
+                return False
+
+        # Confirma que o campo de data está visível (sessão estabelecida)
+        if await page.locator("#datainicio").count() > 0:
+            print("✅ Sessão estabelecida com sucesso")
+            return True
+
+        print("❌ Sessão não estabelecida — campo #datainicio não encontrado")
+        return False
+
+    except Exception as e:
+        print(f"❌ Erro ao aquecer sessão: {e}")
+        return False
+
+
+# =========================
 # MODELS — IMPORTAÇÃO
 # =========================
 class ImportRequest(BaseModel):
@@ -149,6 +203,8 @@ async def status_job(job_id: str):
 # Abre browser com certificado, baixa o XML da nota e retorna o arquivo.
 # CORREÇÃO: desempacota a tupla corretamente com _unpack_browser()
 # em vez de acessar como dicionário (browser_data["page"]).
+# Também usa _aquecer_sessao() antes do download para garantir
+# que o portal reconheça o certificado antes do fetch.
 # =========================
 @router.post("/baixar-xml")
 async def baixar_xml_individual(req: DownloadRequest):
@@ -167,6 +223,9 @@ async def baixar_xml_individual(req: DownloadRequest):
         )
         # CORREÇÃO: desempacota tupla — antes estava usando browser_data["page"] (erro)
         _, _, _, page, _, _ = _unpack_browser(browser_tuple)
+
+        # Estabelece sessão autenticada antes do download
+        await _aquecer_sessao(page)
 
         nota_dict = {"chave_acesso": req.chave_acesso, "url_download": req.url_download}
         ok = await baixar_xml(page, nota_dict, download_dir)
@@ -191,13 +250,16 @@ async def baixar_xml_individual(req: DownloadRequest):
 # O shutil.rmtree fica no finally mas APÓS o StreamingResponse
 # ser gerado — por isso copiamos o zip para memória antes.
 #
+# CORREÇÃO SESSÃO (v8→v9): o browser era criado do zero e ia
+# direto ao download sem passar pelo login do portal. O portal
+# retornava HTML de redirecionamento para login em vez do XML.
+# Agora _aquecer_sessao() navega para o portal e estabelece a
+# sessão via certificado antes de iniciar o loop de downloads.
+#
 # CORREÇÃO ZIP VAZIO (v8): a verificação anterior usava
 # zip_buffer.getbuffer().nbytes == 0, mas um ZIP vazio já
 # ocupa ~22 bytes (cabeçalho), então nunca disparava.
-# Agora verificamos a contagem real de arquivos dentro do ZIP
-# com zipfile.ZipFile(zip_buffer).namelist() antes de retornar.
-# Adicionado também print de debug listando arquivos do diretório
-# para facilitar diagnóstico em caso de falha futura.
+# Agora verificamos a contagem real de arquivos dentro do ZIP.
 # =========================
 @router.post("/baixar-lote-xml")
 async def baixar_lote_xml_route(req: DownloadLoteRequest):
@@ -215,6 +277,15 @@ async def baixar_lote_xml_route(req: DownloadLoteRequest):
         # CORREÇÃO: desempacota tupla corretamente
         _, _, _, page, _, _ = _unpack_browser(browser_tuple)
 
+        # CORREÇÃO SESSÃO: estabelece sessão autenticada no portal antes
+        # de iniciar os downloads — sem isso o portal rejeita os fetches
+        sessao_ok = await _aquecer_sessao(page)
+        if not sessao_ok:
+            raise HTTPException(
+                status_code=500,
+                detail="Não foi possível autenticar no portal NFS-e. Verifique o certificado."
+            )
+
         sucesso, falha = 0, 0
         for nota in req.notas:
             if not nota.url_download:
@@ -230,11 +301,8 @@ async def baixar_lote_xml_route(req: DownloadLoteRequest):
 
         print(f"✅ Lote XML: {sucesso} ok / {falha} falhas")
 
-        # CORREÇÃO ZIP VAZIO: lista os arquivos reais no diretório antes de compactar.
-        # O print de debug mostra exatamente o que foi salvo no disco,
-        # permitindo identificar discrepâncias entre o nome esperado e o salvo.
-        arquivos_no_dir = os.listdir(download_dir)
-        arquivos_xml = [f for f in arquivos_no_dir if f.endswith(".xml")]
+        # Lista os arquivos reais no diretório antes de compactar (debug)
+        arquivos_xml = [f for f in os.listdir(download_dir) if f.endswith(".xml")]
         print(f"📂 Arquivos no diretório ({len(arquivos_xml)} XMLs): {arquivos_xml}")
 
         # Compacta em memória antes do finally limpar o diretório
