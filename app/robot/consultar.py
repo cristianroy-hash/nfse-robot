@@ -20,7 +20,8 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
             timeout=90000
         )
 
-        await page.wait_for_timeout(5000)
+        # 🔥 MELHORIA PERFORMANCE: substitui espera fixa por espera inteligente
+        await page.wait_for_selector("#datainicio", timeout=30000)
 
         # =========================
         # VALIDA LOGIN
@@ -34,7 +35,9 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 if await btn_cert.count() > 0:
                     print("Na tela de login. Clicando no botão Certificado...")
                     await btn_cert.click()
-                    await page.wait_for_timeout(8000)
+
+                    # 🔥 MELHORIA PERFORMANCE
+                    await page.wait_for_selector("#datainicio", timeout=30000)
 
                     await page.goto(
                         "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
@@ -56,7 +59,9 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         await page.keyboard.press("Backspace")
         await page.keyboard.type(data_ini_fmt, delay=100)
         await page.keyboard.press("Tab")
-        await page.wait_for_timeout(800)
+
+        # 🔥 MELHORIA PERFORMANCE
+        await page.wait_for_selector("#datafim", timeout=10000)
 
         print("Preenchendo data final...")
         campo_fim = page.locator("#datafim")
@@ -65,7 +70,9 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
         await page.keyboard.press("Backspace")
         await page.keyboard.type(data_fim_fmt, delay=100)
         await page.keyboard.press("Tab")
-        await page.wait_for_timeout(800)
+
+        # 🔥 MELHORIA PERFORMANCE
+        await page.wait_for_selector("button:has-text('Filtrar')", timeout=10000)
 
         val_ini = await campo_ini.input_value()
         val_fim = await campo_fim.input_value()
@@ -73,7 +80,9 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
 
         print("Clicando em Filtrar...")
         await page.locator("button:has-text('Filtrar')").first.click()
-        await page.wait_for_timeout(8000)
+
+        # 🔥 MELHORIA PERFORMANCE: espera tabela carregar ao invés de sleep
+        await page.wait_for_selector("table tbody tr", timeout=30000)
 
         # =========================
         # PAGINAÇÃO ROBUSTA
@@ -177,7 +186,9 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 print(f"➡️ [FALLBACK] Forçando navegação para página {proxima_pagina}")
 
                 await page.goto(url_forcada, wait_until="networkidle")
-                await page.wait_for_timeout(5000)
+
+                # 🔥 MELHORIA PERFORMANCE
+                await page.wait_for_selector("table tbody tr", timeout=30000)
 
                 texto_forcado = await page.content()
                 if "Nenhum registro encontrado" in texto_forcado or "Nenhum registro" in texto_forcado:
@@ -197,7 +208,9 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 break
 
             await target_button.click()
-            await page.wait_for_timeout(9000)
+
+            # 🔥 MELHORIA PERFORMANCE
+            await page.wait_for_selector("table tbody tr[data-chave]", timeout=30000)
 
             pagina += 1
 
