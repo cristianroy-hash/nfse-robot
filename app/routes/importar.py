@@ -287,17 +287,30 @@ async def baixar_lote_xml_route(req: DownloadLoteRequest):
             )
 
         sucesso, falha = 0, 0
-        for nota in req.notas:
+
+        # 🔥 MELHORIA PERFORMANCE: adiciona paralelismo controlado (mantendo estrutura original)
+        semaphore = asyncio.Semaphore(5)
+
+        async def _baixar_com_controle(nota):
+            nonlocal sucesso, falha
+
             if not nota.url_download:
                 falha += 1
-                continue
+                return
+
             nota_dict = {"chave_acesso": nota.chave_acesso, "url_download": nota.url_download}
-            ok = await baixar_xml(page, nota_dict, download_dir)
+
+            async with semaphore:
+                ok = await baixar_xml(page, nota_dict, download_dir)
+
             if ok:
                 sucesso += 1
             else:
                 falha += 1
-            await asyncio.sleep(0.8)  # pausa entre downloads para não sobrecarregar
+
+        # 🔥 MELHORIA PERFORMANCE: substitui loop sequencial por execução paralela controlada
+        tasks = [_baixar_com_controle(nota) for nota in req.notas]
+        await asyncio.gather(*tasks)
 
         print(f"✅ Lote XML: {sucesso} ok / {falha} falhas")
 
