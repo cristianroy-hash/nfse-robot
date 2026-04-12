@@ -137,6 +137,78 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                         + nota["data_chave"]
                     ) if nota.get("data_chave") else None
 
+                    # =========================
+                    # ✅ NOVA MELHORIA — CONTEÚDO XML EM BASE64
+                    # Baixa o XML da nota via fetch autenticado e retorna
+                    # o conteúdo em base64 para o frontend poder fazer
+                    # o download sem depender de URL autenticada que expira.
+                    # =========================
+                    try:
+                        url_xml = nota.get("url_download")
+                        if url_xml:
+                            conteudo_xml = await page.evaluate(f"""async () => {{
+                                try {{
+                                    const r = await fetch('{url_xml}', {{ credentials: 'include' }});
+                                    return await r.text();
+                                }} catch(e) {{ return null; }}
+                            }}""")
+                            if conteudo_xml and "<?xml" in conteudo_xml:
+                                nota["conteudo_xml"] = conteudo_xml
+                                print(f"✅ XML capturado: {chave[:20]}...")
+                            else:
+                                nota["conteudo_xml"] = None
+                        else:
+                            nota["conteudo_xml"] = None
+                    except Exception as e_xml:
+                        print(f"⚠ Erro ao capturar XML: {e_xml}")
+                        nota["conteudo_xml"] = None
+                    # =========================
+                    # FIM NOVA MELHORIA XML
+                    # =========================
+
+                    # =========================
+                    # ✅ NOVA MELHORIA — CONTEÚDO DANFSE EM BASE64
+                    # Baixa o PDF do DANFSe via sessão autenticada do browser
+                    # e retorna o conteúdo em base64 para o frontend poder
+                    # gerar o ZIP sem bloqueio de CORS.
+                    # =========================
+                    try:
+                        url_danfse = nota.get("url_danfse")
+                        if url_danfse:
+                            context = page.context
+                            new_page = await context.new_page()
+                            conteudo_danfse_b64 = None
+                            try:
+                                async with new_page.expect_download(timeout=20000) as download_info:
+                                    await new_page.goto(url_danfse)
+                                download = await download_info.value
+
+                                # Salva em memória e converte para base64
+                                import tempfile
+                                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                                    tmp_path = tmp.name
+                                await download.save_as(tmp_path)
+
+                                with open(tmp_path, "rb") as f:
+                                    conteudo_danfse_b64 = base64.b64encode(f.read()).decode("utf-8")
+                                os.remove(tmp_path)
+                                print(f"✅ DANFSe capturado em base64: {chave[:20]}...")
+
+                            except Exception as e_dl:
+                                print(f"⚠ Falha ao baixar DANFSe via download: {e_dl}")
+                            finally:
+                                await new_page.close()
+
+                            nota["conteudo_danfse"] = conteudo_danfse_b64
+                        else:
+                            nota["conteudo_danfse"] = None
+                    except Exception as e_danfse:
+                        print(f"⚠ Erro ao capturar DANFSe: {e_danfse}")
+                        nota["conteudo_danfse"] = None
+                    # =========================
+                    # FIM NOVA MELHORIA DANFSE
+                    # =========================
+
                     novas_notas.append(nota)
 
             if not novas_notas:
