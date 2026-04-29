@@ -23,6 +23,18 @@ except (ImportError, ValueError):
     from app.robot.consultar import baixar_xml
     from app.services.import_service import executar_importacao
 
+# ============================================================
+# [NOVO v2] IMPORT DO SCRAPER MUNICIPAL (Atende.Net)
+# Adicionado para suporte a portais municipais de São José,
+# Palhoça e Biguaçu via scraping com usuário/senha.
+# O try/except segue o mesmo padrão dos imports acima para
+# garantir compatibilidade com diferentes estruturas de deploy.
+# ============================================================
+try:
+    from ..robot.atende_scraper import importar_via_atende, is_portal_atende
+except (ImportError, ValueError):
+    from app.robot.atende_scraper import importar_via_atende, is_portal_atende
+
 router = APIRouter()
 
 # Armazena status dos jobs em memória (resetado a cada deploy)
@@ -134,6 +146,12 @@ async def _aquecer_sessao(page) -> bool:
 
 # =========================
 # MODELS — IMPORTAÇÃO
+# [NOVO v2] Adicionados 3 campos opcionais ao final do model:
+#   portal_url      → URL do portal municipal Atende.Net
+#   portal_usuario  → usuário de acesso ao portal municipal
+#   portal_senha    → senha de acesso ao portal municipal
+# Todos opcionais (None) para manter retrocompatibilidade total
+# com clientes que usam certificado A1 (fluxo original intacto).
 # =========================
 class ImportRequest(BaseModel):
     cliente_id: str
@@ -142,6 +160,10 @@ class ImportRequest(BaseModel):
     data_fim: str
     certificado_base64: Optional[str] = None
     certificado_senha: Optional[str] = None
+    # [NOVO v2] Credenciais para portais municipais Atende.Net
+    portal_url: Optional[str] = None      # ex: https://nfse-saojose.atende.net/...
+    portal_usuario: Optional[str] = None  # usuário cadastrado no portal municipal
+    portal_senha: Optional[str] = None    # senha cadastrada no portal municipal
 
 
 # =========================
@@ -211,7 +233,7 @@ async def baixar_xml_individual(req: DownloadRequest):
     if not req.certificado_base64:
         raise HTTPException(status_code=400, detail="Certificado necessário para baixar XML")
     if not req.url_download:
-        raise HTTPException(status_code=400, detail="url_download é obrigatória")
+        raise HTTPException(status_code=400, detail="URL de download não informada")
 
     download_dir = f"/tmp/xml_{uuid.uuid4().hex}"
     os.makedirs(download_dir, exist_ok=True)
@@ -221,19 +243,24 @@ async def baixar_xml_individual(req: DownloadRequest):
         browser_tuple = await criar_browser_com_certificado(
             req.certificado_base64, req.certificado_senha
         )
-        # CORREÇÃO: desempacota tupla — antes estava usando browser_data["page"] (erro)
+        # CORREÇÃO: desempacota tupla corretamente
         _, _, _, page, _, _ = _unpack_browser(browser_tuple)
 
-        # Estabelece sessão autenticada antes do download
-        await _aquecer_sessao(page)
+        # CORREÇÃO SESSÃO: garante sessão autenticada antes do download
+        sessao_ok = await _aquecer_sessao(page)
+        if not sessao_ok:
+            raise HTTPException(
+                status_code=500,
+                detail="Não foi possível autenticar no portal NFS-e. Verifique o certificado."
+            )
 
         nota_dict = {"chave_acesso": req.chave_acesso, "url_download": req.url_download}
-        ok = await baixar_xml(page, nota_dict, download_dir)
-
-        if not ok:
-            raise HTTPException(status_code=500, detail="Portal recusou o download do XML")
-
         caminho = os.path.join(download_dir, f"{req.chave_acesso}.xml")
+
+        ok = await baixar_xml(page, nota_dict, download_dir)
+        if not ok or not os.path.exists(caminho):
+            raise HTTPException(status_code=500, detail="Falha ao baixar XML")
+
         return FileResponse(
             path=caminho,
             filename=f"{req.chave_acesso}.xml",
@@ -442,3 +469,92 @@ async def baixar_lote_danfse_route(req: DownloadLoteRequest):
     finally:
         if os.path.exists(download_dir):
             shutil.rmtree(download_dir, ignore_errors=True)
+
+
+# =========================
+# [NOVO v2] ROTA: IMPORTAR NOTAS VIA PORTAL MUNICIPAL (Atende.Net)
+#
+# Por que essa rota existe:
+#   Os municípios de São José, Palhoça e Biguaçu não usam o Portal
+#   Nacional (nfse.gov.br) nem certificado A1 para acesso do contribuinte.
+#   Eles operam o sistema Atende.Net com login por usuário e senha.
+#   Esta rota é exclusiva para esse fluxo — não substitui a rota
+#   /importar-notas (certificado A1) que continua funcionando normalmente.
+#
+# Como funciona:
+#   1. Valida se portal_url é um portal Atende.Net suportado
+#   2. Valida se portal_usuario e portal_senha foram informados
+#   3. Chama importar_via_atende() que faz scraping completo:
+#      login → navegação → filtro de datas → extração de notas
+#   4. Retorna a lista de notas encontradas em JSON
+#
+# Portais suportados nesta versão:
+#   - São José/SC  → https://nfse-saojose.atende.net/...
+#   - Palhoça/SC   → https://nfse-palhoca.atende.net/...
+#   - Biguaçu/SC   → https://nfse-bigua.atende.net/...
+#
+# Como o Tributtus deve chamar esta rota:
+#   POST /importar-notas-municipal com o body do ImportRequest
+#   preenchendo portal_url, portal_usuario e portal_senha.
+#   Se o cliente tiver certificado A1 → usa /importar-notas (original).
+#   Se o cliente tiver credenciais de portal → usa esta rota.
+# =========================
+@router.post("/importar-notas-municipal")
+async def importar_notas_municipal(req: ImportRequest):
+
+    # [NOVO v2] Valida se a URL é de um portal Atende.Net suportado
+    if not is_portal_atende(req.portal_url):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"portal_url inválida ou município não suportado: {req.portal_url}. "
+                f"Portais aceitos: nfse-saojose, nfse-palhoca, nfse-bigua (.atende.net)"
+            )
+        )
+
+    # [NOVO v2] Valida credenciais obrigatórias para portais municipais
+    if not req.portal_usuario or not req.portal_senha:
+        raise HTTPException(
+            status_code=400,
+            detail="portal_usuario e portal_senha são obrigatórios para portais municipais Atende.Net"
+        )
+
+    print(f"🏙️ [v2] Importação municipal iniciada")
+    print(f"   Portal  : {req.portal_url}")
+    print(f"   CNPJ    : {req.cnpj}")
+    print(f"   Cliente : {req.cliente_id}")
+    print(f"   Período : {req.data_inicio} → {req.data_fim}")
+
+    try:
+        # [NOVO v2] Chama o scraper do Atende.Net (atende_scraper.py)
+        notas = await importar_via_atende(
+            portal_url=req.portal_url,
+            usuario=req.portal_usuario,
+            senha=req.portal_senha,
+            data_inicio=req.data_inicio,
+            data_fim=req.data_fim,
+        )
+
+        print(f"✅ [v2] Importação municipal concluída: {len(notas)} nota(s) encontrada(s)")
+
+        # [NOVO v2] Retorna no mesmo formato que o frontend espera
+        return {
+            "status": "concluido",
+            "cliente_id": req.cliente_id,
+            "cnpj": req.cnpj,
+            "portal": req.portal_url,
+            "data_inicio": req.data_inicio,
+            "data_fim": req.data_fim,
+            "notas_encontradas": len(notas),
+            "notas": notas,
+        }
+
+    except HTTPException:
+        raise  # repassa HTTPExceptions sem encapsular
+
+    except Exception as e:
+        print(f"❌ [v2] Erro na importação municipal: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro durante scraping do portal municipal: {str(e)}"
+        )
