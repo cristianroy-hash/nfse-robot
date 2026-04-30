@@ -110,6 +110,8 @@ async def criar_browser_atende():
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
             "--disable-blink-features=AutomationControlled",
+            # CORREÇÃO v2.12: simula Chrome moderno para passar verificação de versão
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         ]
     )
 
@@ -119,7 +121,7 @@ async def criar_browser_atende():
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
+            "Chrome/131.0.0.0 Safari/537.36"  # CORREÇÃO v2.12: portal exige Chrome 131+ (era 122, abaixo do mínimo)
         ),
         locale="pt-BR",
         timezone_id="America/Sao_Paulo",
