@@ -203,26 +203,40 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
         await _screenshot_debug(page, "01_popup_bloqueando")
 
         try:
+            # CORREÇÃO v2.7: fechaAvisoManutencao() depende de jQuery ($)
+            # que não está disponível no contexto do Playwright.
+            # Solução: oculta o div diretamente via CSS puro — sem jQuery,
+            # sem eventos, sem dependências externas. Infalível.
             fechou = await page.evaluate("""
                 () => {
-                    // Fecha via função JS nativa do portal (mais confiável)
-                    if (typeof fechaAvisoManutencao === 'function') {
-                        fechaAvisoManutencao();
-                        return 'funcao_js';
-                    }
-                    // Fallback: clica no botão X diretamente pelo id
-                    const btn = document.getElementById('button_close_aviso_manutencao');
-                    if (btn) { btn.click(); return 'clique_id'; }
-                    // Fallback: oculta o div do aviso diretamente
+                    // ESTRATÉGIA 1: oculta o div do popup via CSS puro
                     const aviso = document.getElementById('aviso_manutencao');
-                    if (aviso) { aviso.style.display = 'none'; return 'display_none'; }
+                    if (aviso) {
+                        aviso.style.display      = 'none';
+                        aviso.style.visibility   = 'hidden';
+                        aviso.style.opacity      = '0';
+                        aviso.style.zIndex       = '-9999';
+                        aviso.style.pointerEvents = 'none';
+                        return 'css_puro';
+                    }
                     return null;
                 }
             """)
-            print(f"✅ [Atende] Popup fechado via: {fechou}")
-            await page.wait_for_timeout(2000)
+            print(f"✅ [Atende] Popup ocultado via: {fechou}")
+            await page.wait_for_timeout(1000)
         except Exception as e:
-            print(f"⚠️  [Atende] Erro ao fechar popup: {e}")
+            print(f"⚠️  [Atende] Erro ao ocultar popup via JS: {e}")
+
+        # ESTRATÉGIA 2: clique direto pelo Playwright no botão X (id fixo)
+        # Feito pelo Playwright (não JS) para não depender de jQuery
+        try:
+            btn_x = page.locator("#button_close_aviso_manutencao").first
+            if await btn_x.count() > 0:
+                await btn_x.click(force=True, timeout=5000)
+                print("✅ [Atende] Botão X clicado pelo Playwright")
+                await page.wait_for_timeout(1000)
+        except Exception as e:
+            print(f"⚠️  [Atende] Clique no botão X falhou: {e}")
 
         # Segunda rodada de polling após fechar o popup
         print("🔄 [Atende] Segunda tentativa após fechar popup...")
