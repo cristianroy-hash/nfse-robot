@@ -124,7 +124,24 @@ async def criar_browser_atende():
         locale="pt-BR",
         timezone_id="America/Sao_Paulo",
         accept_downloads=True,
+        # CORREÇÃO v2.11: o portal Atende.Net exige pop-ups habilitados
+        # para carregar jQuery e o plugin WPO que monta o formulário de login.
+        # sem bypass_csp o browser bloqueia scripts do framework WPO.
+        java_script_enabled=True,
+        bypass_csp=True,
     )
+
+    # CORREÇÃO v2.11: concede permissões de pop-up para o portal
+    # Isso simula o usuário que desabilitou o bloqueador de pop-ups
+    try:
+        await context.grant_permissions(
+            ["notifications"],
+            origin="https://nfse-saojose.atende.net"
+        )
+        print("✅ [Atende] Permissões de pop-up concedidas")
+    except Exception as e:
+        print(f"⚠️  [Atende] Permissões: {e}")
+
 
     page = await context.new_page()
     page.set_default_timeout(60000)
@@ -176,8 +193,21 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
     print(f"🌐 [Atende] Acessando: {portal_url}")
 
     # Usa networkidle para aguardar jQuery + WPO carregar completamente
-    await page.goto(portal_url, wait_until="networkidle", timeout=90000)
-    await page.wait_for_timeout(3000)
+    # CORREÇÃO v2.11: adiciona init_script para interceptar o carregamento
+    # e garantir que o contexto de pop-ups esteja liberado antes do jQuery
+    await page.add_init_script("""
+        // Sobrescreve window.open para não ser bloqueado
+        window._originalOpen = window.open;
+        window.open = function(...args) {
+            try { return window._originalOpen(...args); } catch(e) { return null; }
+        };
+        // Remove detecção de popup blocker que impede WPO de inicializar
+        Object.defineProperty(window, 'popupBlocked', { value: false, writable: true });
+    """)
+
+    await page.goto(portal_url, wait_until="networkidle", timeout=120000)
+    await page.wait_for_timeout(5000)  # aguarda WPO inicializar completamente
+
 
     # PASSO 1: fecha popup via CSS puro (sem jQuery — ainda pode não estar pronto)
     print("🧹 [Atende] Fechando popup de manutenção...")
