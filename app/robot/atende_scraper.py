@@ -158,79 +158,98 @@ async def fechar_browser_atende(p, browser):
 # o web component do Atende.Net precisa para habilitar o botão.
 # ============================================================
 async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) -> bool:
-    # CORREÇÃO v2.9: análise do HTML revelou que o Atende.Net monta o
-    # formulário de login em duas etapas:
-    #   1. Carrega a página com spans vazios (label_login_desativo, botao-login)
-    #   2. O usuário clica em um botão de modo de login para montar os inputs
+    # CORREÇÃO v2.10: análise completa do HTML revelou que o Atende.Net usa
+    # o framework WPO (plugin jQuery) para montar os inputs dentro de spans
+    # vazios (.campo_login_desativo, .campo_senha_desativo).
+    # O jQuery e o plugin WPO precisam inicializar completamente antes que
+    # qualquer interação seja possível.
     #
-    # O HTML mostrou as classes: "botao-login", "botao_acessar", "botao_login_govbr"
-    # Precisamos clicar no botão de login com usuário/senha para o formulário aparecer.
-    # Estratégia: navega, fecha popup, clica no botão de login, aguarda inputs.
+    # Fluxo correto identificado:
+    #   1. Página carrega com spans vazios (campo_login_desativo, etc.)
+    #   2. jQuery + WPO inicializam e preenchem os spans com inputs reais
+    #   3. O formulário fica dentro do viewport após a inicialização
+    #   4. Usuário interage com os inputs
+    #
+    # Solução: aguardar jQuery disponível, depois aguardar o plugin WPO
+    # inicializar os campos, depois scrollar para o formulário.
 
     print(f"🌐 [Atende] Acessando: {portal_url}")
-    await page.goto(portal_url, wait_until="domcontentloaded", timeout=90000)
-    await page.wait_for_timeout(5000)
 
-    # PASSO 1: fecha o popup de manutenção via CSS puro (sem jQuery)
+    # Usa networkidle para aguardar jQuery + WPO carregar completamente
+    await page.goto(portal_url, wait_until="networkidle", timeout=90000)
+    await page.wait_for_timeout(3000)
+
+    # PASSO 1: fecha popup via CSS puro (sem jQuery — ainda pode não estar pronto)
     print("🧹 [Atende] Fechando popup de manutenção...")
     await page.evaluate("""
         () => {
             const aviso = document.getElementById('aviso_manutencao');
             if (aviso) {
-                aviso.style.display      = 'none';
-                aviso.style.visibility   = 'hidden';
-                aviso.style.opacity      = '0';
-                aviso.style.zIndex       = '-9999';
-                aviso.style.pointerEvents = 'none';
+                aviso.style.cssText = 'display:none!important;visibility:hidden!important;opacity:0!important;z-index:-9999!important;pointer-events:none!important;';
             }
         }
     """)
     await page.wait_for_timeout(1000)
     await _screenshot_debug(page, "01_pos_popup")
 
-    # PASSO 2: clica no botão que abre o formulário de login usuário/senha
-    # O HTML mostrou múltiplas classes candidatas para o botão de login
-    print("🖱️  [Atende] Procurando botão para abrir formulário de login...")
-    seletores_botao_login = [
-        ".botao-login",
-        ".botao_acessar",
-        ".label_login_desativo",
-        "span.label_login_desativo",
-        "[class*='botao-login']",
-        "[class*='botao_login']",
-        "button:has-text('Entrar')",
-        "button:has-text('Login')",
-        "button:has-text('Acessar')",
-        "a:has-text('Entrar')",
-        "a:has-text('Login')",
-        # gov.br é outro modo — não queremos esse
-    ]
-
-    botao_clicado = False
-    for sel in seletores_botao_login:
+    # PASSO 2: aguarda jQuery disponível e força inicialização do WPO
+    print("⏳ [Atende] Aguardando jQuery + WPO inicializar...")
+    jquery_ok = False
+    for t in range(10):
+        await page.wait_for_timeout(2000)
         try:
-            elem = page.locator(sel).first
-            if await elem.count() > 0:
-                print(f"🖱️  [Atende] Clicando botão de login: {sel}")
-                await elem.click(force=True, timeout=5000)
-                await page.wait_for_timeout(3000)
-                botao_clicado = True
-                print(f"✅ [Atende] Botão clicado: {sel}")
+            resultado = await page.evaluate("""
+                () => {
+                    // Verifica se jQuery está disponível
+                    if (typeof $ === 'undefined' && typeof jQuery === 'undefined') {
+                        return {jquery: false, wpo: false};
+                    }
+                    const jq = typeof $ !== 'undefined' ? $ : jQuery;
+
+                    // Verifica se os spans foram preenchidos pelo WPO
+                    const campoLogin = jq('.campo_login_desativo');
+                    const inputs = campoLogin.find('input').length + 
+                                   jq('.campo_senha_desativo').find('input').length;
+
+                    // Tenta forçar o plugin WPO a inicializar se ainda não fez
+                    if (inputs === 0 && typeof jq.fn.wpoLogin !== 'undefined') {
+                        try { jq('.login').wpoLogin(); } catch(e) {}
+                    }
+
+                    return {
+                        jquery: true,
+                        inputs_dentro_spans: inputs,
+                        campo_login_html: jq('.campo_login_desativo').html(),
+                        campo_senha_html: jq('.campo_senha_desativo').html()
+                    };
+                }
+            """)
+            print(f"   Tentativa {t+1}: {resultado}")
+            if resultado.get('jquery') and resultado.get('inputs_dentro_spans', 0) > 0:
+                print("✅ [Atende] jQuery + WPO inicializados, inputs encontrados!")
+                jquery_ok = True
                 break
         except Exception as e:
-            print(f"⚠️  [Atende] Falhou ({sel}): {e}")
+            print(f"   Tentativa {t+1}: erro — {e}")
 
-    if not botao_clicado:
-        print("⚠️  [Atende] Nenhum botão de login encontrado — tentando direto nos inputs")
+    await _screenshot_debug(page, "02_pos_jquery")
 
-    await _screenshot_debug(page, "02_pos_botao_login")
+    # PASSO 3: scroll para o formulário e busca os inputs
+    print("📜 [Atende] Scrollando para o formulário...")
+    await page.evaluate("""
+        () => {
+            const login = document.querySelector('.login');
+            if (login) login.scrollIntoView({behavior: 'smooth', block: 'center'});
+        }
+    """)
+    await page.wait_for_timeout(1000)
 
-    # PASSO 3: aguarda os inputs aparecerem após clicar no botão
-    print("⏳ [Atende] Aguardando inputs do formulário aparecerem...")
+    # PASSO 4: busca os inputs com seletores dentro dos spans WPO
+    print("🔍 [Atende] Buscando inputs nos spans WPO...")
     inputs_encontrados = False
     info_inputs = []
 
-    for tentativa in range(15):
+    for tentativa in range(10):
         await page.wait_for_timeout(2000)
 
         info_inputs = await page.evaluate("""
@@ -242,47 +261,35 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
                     name: inp.name || '',
                     id: inp.id || '',
                     placeholder: inp.placeholder || '',
-                    visible: inp.offsetParent !== null && getComputedStyle(inp).display !== 'none'
+                    class: inp.className || '',
+                    visible: inp.offsetParent !== null && 
+                             getComputedStyle(inp).display !== 'none' &&
+                             getComputedStyle(inp).visibility !== 'hidden'
                 }));
             }
         """)
 
         inputs_visiveis = [x for x in info_inputs if x['visible']]
-        print(f"🔍 [Atende] Tentativa {tentativa+1}/15 — visíveis: {len(inputs_visiveis)} | DOM: {len(info_inputs)}")
+        print(f"🔍 [Atende] Tentativa {tentativa+1}/10 — visíveis: {len(inputs_visiveis)} | DOM: {len(info_inputs)}")
 
-        if inputs_visiveis:
+        if info_inputs:  # qualquer input no DOM já é suficiente para tentar
             print(f"📋 [Atende] Inputs: {info_inputs}")
             inputs_encontrados = True
             break
 
-        # A cada 5 tentativas sem resultado, tenta clicar novamente nos botões
-        if tentativa in [4, 9] and not inputs_encontrados:
-            print("🔄 [Atende] Re-tentando clique no botão de login...")
-            for sel in seletores_botao_login:
-                try:
-                    elem = page.locator(sel).first
-                    if await elem.count() > 0:
-                        await elem.click(force=True, timeout=3000)
-                        print(f"✅ [Atende] Re-clique: {sel}")
-                        await page.wait_for_timeout(2000)
-                        break
-                except Exception:
-                    pass
-
     if not inputs_encontrados:
-        # Diagnóstico final completo
         html_completo = await page.evaluate("""
             () => document.body.innerHTML.substring(0, 10000)
         """)
-        print(f"📄 [Atende] HTML completo (10000): {html_completo}")
-
+        print(f"📄 [Atende] HTML (10000): {html_completo}")
         frames = page.frames
         print(f"🖼️  [Atende] Frames: {len(frames)}")
         for i, frame in enumerate(frames):
             try:
                 fi = await frame.evaluate("""
                     () => Array.from(document.querySelectorAll('input'))
-                              .map(inp => ({type:inp.type, name:inp.name, id:inp.id, visible: inp.offsetParent !== null}))
+                              .map(inp => ({type:inp.type, name:inp.name, id:inp.id,
+                                           visible: inp.offsetParent !== null}))
                 """)
                 print(f"   Frame {i} ({frame.url[:100]}): {fi}")
             except Exception as fe:
@@ -293,6 +300,7 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
         return False
 
     await _screenshot_debug(page, "03_formulario_encontrado")
+
 
 
     # Seletores do mais específico ao mais genérico
