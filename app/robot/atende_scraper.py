@@ -121,16 +121,23 @@ async def criar_browser_atende():
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"  # CORREÇÃO v2.12: portal exige Chrome 131+ (era 122, abaixo do mínimo)
+            "Chrome/131.0.0.0 Safari/537.36"
         ),
         locale="pt-BR",
         timezone_id="America/Sao_Paulo",
         accept_downloads=True,
-        # CORREÇÃO v2.11: o portal Atende.Net exige pop-ups habilitados
-        # para carregar jQuery e o plugin WPO que monta o formulário de login.
-        # sem bypass_csp o browser bloqueia scripts do framework WPO.
         java_script_enabled=True,
         bypass_csp=True,
+        # CORREÇÃO v2.13: sobrescreve headers que delatam o Playwright.
+        # O Playwright envia sec-ch-ua="HeadlessChrome" que o Atende.Net
+        # detecta e usa para bloquear o formulário de login (mensagemNavegador).
+        # Sobrescrevemos com headers idênticos aos de um Chrome 131 real.
+        extra_http_headers={
+            "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "accept-language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        },
     )
 
     # CORREÇÃO v2.11: concede permissões de pop-up para o portal
