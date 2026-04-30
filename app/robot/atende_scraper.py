@@ -477,16 +477,52 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
         await _screenshot_debug(page, "05_erro_botao")
         return False
 
-    await page.wait_for_timeout(4000)
-    await _screenshot_debug(page, "06_pos_entrar")
+    # CORREÇÃO v2.15: aguarda até 40s para o sistema redirecionar.
+    # O fluxo real é: clica Entrar → aparece captcha → resolve captcha
+    # → ENTÃO redireciona. Não verificamos URL imediatamente.
+    print("⏳ [Atende] Aguardando redirecionamento pós-login (captcha pode aparecer)...")
+    for t in range(20):
+        await page.wait_for_timeout(2000)
+        url_atual = page.url
 
-    url_atual = page.url
-    if "login" in url_atual.lower():
-        print(f"❌ [Atende] Ainda na página de login: {url_atual}")
-        return False
+        # Verifica se saiu da página de login
+        if "sistema" in url_atual or (
+            "autoatendimento" not in url_atual and "login" not in url_atual.lower()
+        ):
+            print(f"✅ [Atende] Login ok — URL: {url_atual}")
+            return True
 
-    print(f"✅ [Atende] Login ok — URL: {url_atual}")
-    return True
+        # Verifica se há captcha na página e tenta resolver
+        iframe_count = await page.locator("iframe[src*='recaptcha']").count()
+        if iframe_count > 0:
+            print(f"🤖 [Atende] Captcha detectado na tentativa {t+1} — tentando resolver...")
+            try:
+                iframe = page.frame_locator("iframe[src*='recaptcha']").first
+                checkbox = iframe.locator("#recaptcha-anchor").first
+                if await checkbox.count() > 0:
+                    is_checked = await checkbox.get_attribute("aria-checked")
+                    if is_checked != "true":
+                        await checkbox.click(timeout=10000)
+                        print("✅ [Atende] Checkbox captcha clicado")
+                        await page.wait_for_timeout(3000)
+            except Exception as e:
+                print(f"⚠️  [Atende] Erro no captcha: {e}")
+
+        # Verifica botão "Acessar" intermediário
+        btn_acessar = page.locator("button:has-text('Acessar'), a:has-text('Acessar')").first
+        if await btn_acessar.count() > 0:
+            print(f"🖱️  [Atende] Botão Acessar detectado na tentativa {t+1} — clicando...")
+            try:
+                await btn_acessar.click(force=True, timeout=5000)
+                await page.wait_for_timeout(3000)
+            except Exception as e:
+                print(f"⚠️  [Atende] Erro ao clicar Acessar: {e}")
+
+        print(f"   Aguardando... tentativa {t+1}/20 | URL: {url_atual[:80]}")
+
+    await _screenshot_debug(page, "06_timeout_pos_entrar")
+    print(f"❌ [Atende] Timeout aguardando redirecionamento. URL final: {page.url}")
+    return False
 
 
 # ============================================================
@@ -551,12 +587,10 @@ async def _resolver_captcha(page: Page) -> bool:
 # PASSO 6-7: AGUARDAR SISTEMA E FECHAR POPUP
 # ============================================================
 async def _aguardar_sistema_e_fechar_popup(page: Page):
-    print("⏳ [Atende] Aguardando sistema...")
-    try:
-        await page.wait_for_url("**/sistema/**", timeout=30000)
-        print(f"✅ [Atende] Sistema: {page.url}")
-    except Exception:
-        print(f"⚠️  [Atende] Timeout — URL: {page.url}")
+    # CORREÇÃO v2.15: o login já aguarda o redirecionamento com captcha.
+    # Esta função agora só fecha popups e garante que a tela está estável.
+    print(f"⏳ [Atende] Verificando tela pós-login — URL: {page.url}")
+    await page.wait_for_timeout(3000)
 
     await page.wait_for_timeout(3000)
     await _screenshot_debug(page, "10_sistema")
