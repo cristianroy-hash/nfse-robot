@@ -158,40 +158,55 @@ async def fechar_browser_atende(p, browser):
 # o web component do Atende.Net precisa para habilitar o botão.
 # ============================================================
 async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) -> bool:
+    # CORREÇÃO v2.5: o Atende.Net é uma SPA (Angular/Vue) que renderiza
+    # o formulário de login inteiramente via JS após o carregamento inicial.
+    # O wait_until="networkidle" não é suficiente pois o framework continua
+    # executando JS após a rede ficar quieta.
+    # Estratégia: navega com domcontentloaded (mais rápido), depois aguarda
+    # ativamente até os inputs aparecerem no DOM, com polling a cada 2s.
     print(f"🌐 [Atende] Acessando: {portal_url}")
-    await page.goto(portal_url, wait_until="networkidle", timeout=90000)
+    await page.goto(portal_url, wait_until="domcontentloaded", timeout=90000)
+    print("⏳ [Atende] Aguardando SPA renderizar o formulário de login...")
 
-    # CORREÇÃO v2.4: o Atende.Net renderiza os campos via JS dinamicamente.
-    # O HTML estático não tem name/id nos inputs — aguarda o JS renderizar.
-    print("⏳ [Atende] Aguardando renderização dos campos pelo JS...")
-    try:
-        await page.wait_for_selector("input", state="visible", timeout=15000)
-        print("✅ [Atende] Campos renderizados pelo JS")
-    except Exception:
-        print("⚠️  [Atende] Timeout aguardando inputs — tentando mesmo assim")
+    # Polling ativo: verifica a cada 2s se inputs apareceram, por até 30s
+    inputs_encontrados = False
+    for tentativa in range(15):
+        await page.wait_for_timeout(2000)
 
-    await page.wait_for_timeout(2000)
-    await _screenshot_debug(page, "01_pagina_inicial")
-
-    # CORREÇÃO v2.4: lista todos os inputs da página via JS para diagnóstico
-    # e para encontrar o campo de usuário independente de name/id estático.
-    try:
         info_inputs = await page.evaluate("""
             () => {
                 const inputs = Array.from(document.querySelectorAll('input'));
                 return inputs.map((inp, i) => ({
                     index: i,
-                    type: inp.type,
-                    name: inp.name,
-                    id: inp.id,
-                    placeholder: inp.placeholder,
-                    visible: inp.offsetParent !== null
+                    type: inp.type || 'text',
+                    name: inp.name || '',
+                    id: inp.id || '',
+                    placeholder: inp.placeholder || '',
+                    visible: inp.offsetParent !== null && getComputedStyle(inp).display !== 'none'
                 }));
             }
         """)
-        print(f"📋 [Atende] Inputs na página: {info_inputs}")
-    except Exception as e:
-        print(f"⚠️  [Atende] Erro ao listar inputs: {e}")
+
+        inputs_visiveis = [x for x in info_inputs if x['visible']]
+        print(f"🔍 [Atende] Tentativa {tentativa+1}/15 — inputs visíveis: {len(inputs_visiveis)} | total DOM: {len(info_inputs)}")
+
+        if inputs_visiveis:
+            print(f"📋 [Atende] Inputs encontrados: {info_inputs}")
+            inputs_encontrados = True
+            break
+
+    if not inputs_encontrados:
+        print("❌ [Atende] Formulário não renderizou após 30s")
+        await _screenshot_debug(page, "01_sem_formulario")
+
+        # Tenta inspecionar o DOM para entender a estrutura da página
+        html_resumo = await page.evaluate("""
+            () => document.body.innerHTML.substring(0, 2000)
+        """)
+        print(f"📄 [Atende] HTML (primeiros 2000 chars): {html_resumo}")
+        return False
+
+    await _screenshot_debug(page, "01_pagina_inicial")
 
     # Seletores do mais específico ao mais genérico
     seletores_usuario = [
