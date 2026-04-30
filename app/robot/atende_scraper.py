@@ -158,18 +158,78 @@ async def fechar_browser_atende(p, browser):
 # o web component do Atende.Net precisa para habilitar o botão.
 # ============================================================
 async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) -> bool:
-    # CORREÇÃO v2.5: o Atende.Net é uma SPA (Angular/Vue) que renderiza
-    # o formulário de login inteiramente via JS após o carregamento inicial.
-    # O wait_until="networkidle" não é suficiente pois o framework continua
-    # executando JS após a rede ficar quieta.
-    # Estratégia: navega com domcontentloaded (mais rápido), depois aguarda
-    # ativamente até os inputs aparecerem no DOM, com polling a cada 2s.
+    # CORREÇÃO v2.9: análise do HTML revelou que o Atende.Net monta o
+    # formulário de login em duas etapas:
+    #   1. Carrega a página com spans vazios (label_login_desativo, botao-login)
+    #   2. O usuário clica em um botão de modo de login para montar os inputs
+    #
+    # O HTML mostrou as classes: "botao-login", "botao_acessar", "botao_login_govbr"
+    # Precisamos clicar no botão de login com usuário/senha para o formulário aparecer.
+    # Estratégia: navega, fecha popup, clica no botão de login, aguarda inputs.
+
     print(f"🌐 [Atende] Acessando: {portal_url}")
     await page.goto(portal_url, wait_until="domcontentloaded", timeout=90000)
-    print("⏳ [Atende] Aguardando SPA renderizar o formulário de login...")
+    await page.wait_for_timeout(5000)
 
-    # Polling ativo: verifica a cada 2s se inputs apareceram, por até 30s
+    # PASSO 1: fecha o popup de manutenção via CSS puro (sem jQuery)
+    print("🧹 [Atende] Fechando popup de manutenção...")
+    await page.evaluate("""
+        () => {
+            const aviso = document.getElementById('aviso_manutencao');
+            if (aviso) {
+                aviso.style.display      = 'none';
+                aviso.style.visibility   = 'hidden';
+                aviso.style.opacity      = '0';
+                aviso.style.zIndex       = '-9999';
+                aviso.style.pointerEvents = 'none';
+            }
+        }
+    """)
+    await page.wait_for_timeout(1000)
+    await _screenshot_debug(page, "01_pos_popup")
+
+    # PASSO 2: clica no botão que abre o formulário de login usuário/senha
+    # O HTML mostrou múltiplas classes candidatas para o botão de login
+    print("🖱️  [Atende] Procurando botão para abrir formulário de login...")
+    seletores_botao_login = [
+        ".botao-login",
+        ".botao_acessar",
+        ".label_login_desativo",
+        "span.label_login_desativo",
+        "[class*='botao-login']",
+        "[class*='botao_login']",
+        "button:has-text('Entrar')",
+        "button:has-text('Login')",
+        "button:has-text('Acessar')",
+        "a:has-text('Entrar')",
+        "a:has-text('Login')",
+        # gov.br é outro modo — não queremos esse
+    ]
+
+    botao_clicado = False
+    for sel in seletores_botao_login:
+        try:
+            elem = page.locator(sel).first
+            if await elem.count() > 0:
+                print(f"🖱️  [Atende] Clicando botão de login: {sel}")
+                await elem.click(force=True, timeout=5000)
+                await page.wait_for_timeout(3000)
+                botao_clicado = True
+                print(f"✅ [Atende] Botão clicado: {sel}")
+                break
+        except Exception as e:
+            print(f"⚠️  [Atende] Falhou ({sel}): {e}")
+
+    if not botao_clicado:
+        print("⚠️  [Atende] Nenhum botão de login encontrado — tentando direto nos inputs")
+
+    await _screenshot_debug(page, "02_pos_botao_login")
+
+    # PASSO 3: aguarda os inputs aparecerem após clicar no botão
+    print("⏳ [Atende] Aguardando inputs do formulário aparecerem...")
     inputs_encontrados = False
+    info_inputs = []
+
     for tentativa in range(15):
         await page.wait_for_timeout(2000)
 
@@ -188,112 +248,52 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
         """)
 
         inputs_visiveis = [x for x in info_inputs if x['visible']]
-        print(f"🔍 [Atende] Tentativa {tentativa+1}/15 — inputs visíveis: {len(inputs_visiveis)} | total DOM: {len(info_inputs)}")
+        print(f"🔍 [Atende] Tentativa {tentativa+1}/15 — visíveis: {len(inputs_visiveis)} | DOM: {len(info_inputs)}")
 
         if inputs_visiveis:
-            print(f"📋 [Atende] Inputs encontrados: {info_inputs}")
+            print(f"📋 [Atende] Inputs: {info_inputs}")
             inputs_encontrados = True
             break
 
-    if not inputs_encontrados:
-        # CORREÇÃO v2.6: o HTML revelou que um popup de aviso de manutenção
-        # bloqueia o formulário de login. O popup tem id fixo e conhecido:
-        # id="button_close_aviso_manutencao" — fecha via JS e tenta novamente.
-        print("⚠️  [Atende] Inputs não encontrados — tentando fechar popup de aviso...")
-        await _screenshot_debug(page, "01_popup_bloqueando")
-
-        try:
-            # CORREÇÃO v2.7: fechaAvisoManutencao() depende de jQuery ($)
-            # que não está disponível no contexto do Playwright.
-            # Solução: oculta o div diretamente via CSS puro — sem jQuery,
-            # sem eventos, sem dependências externas. Infalível.
-            fechou = await page.evaluate("""
-                () => {
-                    // ESTRATÉGIA 1: oculta o div do popup via CSS puro
-                    const aviso = document.getElementById('aviso_manutencao');
-                    if (aviso) {
-                        aviso.style.display      = 'none';
-                        aviso.style.visibility   = 'hidden';
-                        aviso.style.opacity      = '0';
-                        aviso.style.zIndex       = '-9999';
-                        aviso.style.pointerEvents = 'none';
-                        return 'css_puro';
-                    }
-                    return null;
-                }
-            """)
-            print(f"✅ [Atende] Popup ocultado via: {fechou}")
-            await page.wait_for_timeout(1000)
-        except Exception as e:
-            print(f"⚠️  [Atende] Erro ao ocultar popup via JS: {e}")
-
-        # ESTRATÉGIA 2: clique direto pelo Playwright no botão X (id fixo)
-        # Feito pelo Playwright (não JS) para não depender de jQuery
-        try:
-            btn_x = page.locator("#button_close_aviso_manutencao").first
-            if await btn_x.count() > 0:
-                await btn_x.click(force=True, timeout=5000)
-                print("✅ [Atende] Botão X clicado pelo Playwright")
-                await page.wait_for_timeout(1000)
-        except Exception as e:
-            print(f"⚠️  [Atende] Clique no botão X falhou: {e}")
-
-        # Segunda rodada de polling após fechar o popup
-        print("🔄 [Atende] Segunda tentativa após fechar popup...")
-        for tentativa in range(10):
-            await page.wait_for_timeout(2000)
-
-            info_inputs = await page.evaluate("""
-                () => {
-                    const inputs = Array.from(document.querySelectorAll('input'));
-                    return inputs.map((inp, i) => ({
-                        index: i,
-                        type: inp.type || 'text',
-                        name: inp.name || '',
-                        id: inp.id || '',
-                        placeholder: inp.placeholder || '',
-                        visible: inp.offsetParent !== null && getComputedStyle(inp).display !== 'none'
-                    }));
-                }
-            """)
-
-            inputs_visiveis = [x for x in info_inputs if x['visible']]
-            print(f"🔍 [Atende] Pós-popup tentativa {tentativa+1}/10 — inputs visíveis: {len(inputs_visiveis)}")
-
-            if inputs_visiveis:
-                print(f"📋 [Atende] Inputs encontrados: {info_inputs}")
-                inputs_encontrados = True
-                break
-
-        if not inputs_encontrados:
-            html_resumo = await page.evaluate("""
-                () => document.body.innerHTML.substring(0, 8000)
-            """)
-            print(f"📄 [Atende] HTML (8000 chars): {html_resumo}")
-
-            # v2.8: inspeciona todos os frames — formulário pode estar em iframe
-            frames = page.frames
-            print(f"🖼️  [Atende] Total frames: {len(frames)}")
-            for i, frame in enumerate(frames):
+        # A cada 5 tentativas sem resultado, tenta clicar novamente nos botões
+        if tentativa in [4, 9] and not inputs_encontrados:
+            print("🔄 [Atende] Re-tentando clique no botão de login...")
+            for sel in seletores_botao_login:
                 try:
-                    frame_inputs = await frame.evaluate("""
-                        () => {
-                            const inputs = Array.from(document.querySelectorAll('input'));
-                            return inputs.map(inp => ({
-                                type: inp.type, name: inp.name,
-                                id: inp.id, placeholder: inp.placeholder,
-                                visible: inp.offsetParent !== null
-                            }));
-                        }
-                    """)
-                    print(f"   Frame {i} ({frame.url[:100]}): {frame_inputs}")
-                except Exception as fe:
-                    print(f"   Frame {i}: erro — {fe}")
+                    elem = page.locator(sel).first
+                    if await elem.count() > 0:
+                        await elem.click(force=True, timeout=3000)
+                        print(f"✅ [Atende] Re-clique: {sel}")
+                        await page.wait_for_timeout(2000)
+                        break
+                except Exception:
+                    pass
 
-            print("❌ [Atende] Formulário não apareceu mesmo após fechar popup")
-            return False
+    if not inputs_encontrados:
+        # Diagnóstico final completo
+        html_completo = await page.evaluate("""
+            () => document.body.innerHTML.substring(0, 10000)
+        """)
+        print(f"📄 [Atende] HTML completo (10000): {html_completo}")
 
-    await _screenshot_debug(page, "01_pagina_inicial")
+        frames = page.frames
+        print(f"🖼️  [Atende] Frames: {len(frames)}")
+        for i, frame in enumerate(frames):
+            try:
+                fi = await frame.evaluate("""
+                    () => Array.from(document.querySelectorAll('input'))
+                              .map(inp => ({type:inp.type, name:inp.name, id:inp.id, visible: inp.offsetParent !== null}))
+                """)
+                print(f"   Frame {i} ({frame.url[:100]}): {fi}")
+            except Exception as fe:
+                print(f"   Frame {i}: erro — {fe}")
+
+        print("❌ [Atende] Formulário não encontrado após todas as tentativas")
+        await _screenshot_debug(page, "03_sem_formulario_final")
+        return False
+
+    await _screenshot_debug(page, "03_formulario_encontrado")
+
 
     # Seletores do mais específico ao mais genérico
     seletores_usuario = [
