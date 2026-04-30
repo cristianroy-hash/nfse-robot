@@ -582,13 +582,60 @@ async def _aguardar_sistema_e_fechar_popup(page: Page):
 # ============================================================
 async def _abrir_gerenciamento_notas(page: Page) -> bool:
     print("🗂️  [Atende] Procurando card 'Gerenciamento de Notas'...")
-    await page.wait_for_timeout(2000)
 
+    # Aguarda a tela do sistema carregar completamente
+    await page.wait_for_timeout(5000)
+
+    # DIAGNÓSTICO v2.14: imprime HTML e todos os links/botões/cards
+    # visíveis na tela pós-login para identificar seletores corretos
+    try:
+        elementos_visiveis = await page.evaluate("""
+            () => {
+                const results = [];
+                // Captura todos os elementos clicáveis
+                const sels = ['a', 'button', 'div[class*="card"]', 'li',
+                              'span[class*="menu"]', 'div[class*="menu"]',
+                              'div[class*="item"]', 'div[class*="servico"]',
+                              'div[class*="modulo"]', 'div[onclick]'];
+                sels.forEach(sel => {
+                    document.querySelectorAll(sel).forEach(el => {
+                        const txt = el.textContent.trim().substring(0, 60);
+                        if (txt && el.offsetParent !== null) {
+                            results.push({
+                                tag: el.tagName,
+                                class: el.className.substring(0, 80),
+                                text: txt,
+                                href: el.href || '',
+                                onclick: el.getAttribute('onclick') || ''
+                            });
+                        }
+                    });
+                });
+                return results.slice(0, 50); // primeiros 50 elementos
+            }
+        """)
+        print(f"📋 [Atende] Elementos visíveis pós-login ({len(elementos_visiveis)}):")
+        for el in elementos_visiveis:
+            print(f"   {el['tag']} | class='{el['class'][:50]}' | text='{el['text']}'")
+    except Exception as e:
+        print(f"⚠️  [Atende] Erro ao listar elementos: {e}")
+
+    html_sistema = await page.evaluate("""
+        () => document.body.innerHTML.substring(0, 5000)
+    """)
+    print(f"📄 [Atende] HTML sistema: {html_sistema}")
+
+    # Tenta seletores — serão ajustados após ver o HTML acima
     for sel in ["text=Gerenciamento de Notas",
                 "a:has-text('Gerenciamento de Notas')",
                 "div:has-text('Gerenciamento de Notas')",
                 "[class*='card']:has-text('Gerenciamento')",
-                "text=Gerenciamento"]:
+                "text=Gerenciamento",
+                "text=Notas",
+                "a:has-text('Notas')",
+                "[class*='servico']:has-text('Nota')",
+                "[class*='item']:has-text('Nota')",
+                "[class*='modulo']:has-text('Nota')"]:
         elem = page.locator(sel).first
         if await elem.count() > 0:
             try:
