@@ -196,15 +196,69 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
             break
 
     if not inputs_encontrados:
-        print("❌ [Atende] Formulário não renderizou após 30s")
-        await _screenshot_debug(page, "01_sem_formulario")
+        # CORREÇÃO v2.6: o HTML revelou que um popup de aviso de manutenção
+        # bloqueia o formulário de login. O popup tem id fixo e conhecido:
+        # id="button_close_aviso_manutencao" — fecha via JS e tenta novamente.
+        print("⚠️  [Atende] Inputs não encontrados — tentando fechar popup de aviso...")
+        await _screenshot_debug(page, "01_popup_bloqueando")
 
-        # Tenta inspecionar o DOM para entender a estrutura da página
-        html_resumo = await page.evaluate("""
-            () => document.body.innerHTML.substring(0, 2000)
-        """)
-        print(f"📄 [Atende] HTML (primeiros 2000 chars): {html_resumo}")
-        return False
+        try:
+            fechou = await page.evaluate("""
+                () => {
+                    // Fecha via função JS nativa do portal (mais confiável)
+                    if (typeof fechaAvisoManutencao === 'function') {
+                        fechaAvisoManutencao();
+                        return 'funcao_js';
+                    }
+                    // Fallback: clica no botão X diretamente pelo id
+                    const btn = document.getElementById('button_close_aviso_manutencao');
+                    if (btn) { btn.click(); return 'clique_id'; }
+                    // Fallback: oculta o div do aviso diretamente
+                    const aviso = document.getElementById('aviso_manutencao');
+                    if (aviso) { aviso.style.display = 'none'; return 'display_none'; }
+                    return null;
+                }
+            """)
+            print(f"✅ [Atende] Popup fechado via: {fechou}")
+            await page.wait_for_timeout(2000)
+        except Exception as e:
+            print(f"⚠️  [Atende] Erro ao fechar popup: {e}")
+
+        # Segunda rodada de polling após fechar o popup
+        print("🔄 [Atende] Segunda tentativa após fechar popup...")
+        for tentativa in range(10):
+            await page.wait_for_timeout(2000)
+
+            info_inputs = await page.evaluate("""
+                () => {
+                    const inputs = Array.from(document.querySelectorAll('input'));
+                    return inputs.map((inp, i) => ({
+                        index: i,
+                        type: inp.type || 'text',
+                        name: inp.name || '',
+                        id: inp.id || '',
+                        placeholder: inp.placeholder || '',
+                        visible: inp.offsetParent !== null && getComputedStyle(inp).display !== 'none'
+                    }));
+                }
+            """)
+
+            inputs_visiveis = [x for x in info_inputs if x['visible']]
+            print(f"🔍 [Atende] Pós-popup tentativa {tentativa+1}/10 — inputs visíveis: {len(inputs_visiveis)}")
+
+            if inputs_visiveis:
+                print(f"📋 [Atende] Inputs encontrados: {info_inputs}")
+                inputs_encontrados = True
+                break
+
+        if not inputs_encontrados:
+            html_resumo = await page.evaluate("""
+                () => document.body.innerHTML.substring(0, 2000)
+            """)
+            print(f"📄 [Atende] HTML (2000 chars): {html_resumo}")
+            print("❌ [Atende] Formulário não apareceu mesmo após fechar popup")
+            await _screenshot_debug(page, "01_sem_formulario_final")
+            return False
 
     await _screenshot_debug(page, "01_pagina_inicial")
 
