@@ -160,22 +160,63 @@ async def fechar_browser_atende(p, browser):
 async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) -> bool:
     print(f"🌐 [Atende] Acessando: {portal_url}")
     await page.goto(portal_url, wait_until="networkidle", timeout=90000)
-    await page.wait_for_timeout(3000)
+
+    # CORREÇÃO v2.4: o Atende.Net renderiza os campos via JS dinamicamente.
+    # O HTML estático não tem name/id nos inputs — aguarda o JS renderizar.
+    print("⏳ [Atende] Aguardando renderização dos campos pelo JS...")
+    try:
+        await page.wait_for_selector("input", state="visible", timeout=15000)
+        print("✅ [Atende] Campos renderizados pelo JS")
+    except Exception:
+        print("⚠️  [Atende] Timeout aguardando inputs — tentando mesmo assim")
+
+    await page.wait_for_timeout(2000)
     await _screenshot_debug(page, "01_pagina_inicial")
 
-    # ── Campo usuário ─────────────────────────────────────────
+    # CORREÇÃO v2.4: lista todos os inputs da página via JS para diagnóstico
+    # e para encontrar o campo de usuário independente de name/id estático.
+    try:
+        info_inputs = await page.evaluate("""
+            () => {
+                const inputs = Array.from(document.querySelectorAll('input'));
+                return inputs.map((inp, i) => ({
+                    index: i,
+                    type: inp.type,
+                    name: inp.name,
+                    id: inp.id,
+                    placeholder: inp.placeholder,
+                    visible: inp.offsetParent !== null
+                }));
+            }
+        """)
+        print(f"📋 [Atende] Inputs na página: {info_inputs}")
+    except Exception as e:
+        print(f"⚠️  [Atende] Erro ao listar inputs: {e}")
+
+    # Seletores do mais específico ao mais genérico
     seletores_usuario = [
-        "input[name='login']", "input[id='login']",
-        "input[name='usuario']", "input[id='usuario']",
-        "input[type='text']:visible",
+        "input[name='login']",
+        "input[id='login']",
+        "input[name='usuario']",
+        "input[id='usuario']",
+        "input[autocomplete='username']",
+        "input[placeholder*='usu']",
+        "input[placeholder*='CPF']",
+        "input[placeholder*='ogin']",
+        # Fallback: primeiro input de texto visível (não é password nem hidden)
+        "input:not([type='password']):not([type='hidden']):not([type='checkbox'])",
     ]
+
     campo_usuario = None
     for sel in seletores_usuario:
-        elem = page.locator(sel).first
-        if await elem.count() > 0:
-            print(f"✅ [Atende] Campo usuário: {sel}")
-            campo_usuario = elem
-            break
+        try:
+            elem = page.locator(sel).first
+            if await elem.count() > 0 and await elem.is_visible():
+                print(f"✅ [Atende] Campo usuário: {sel}")
+                campo_usuario = elem
+                break
+        except Exception as e:
+            print(f"⚠️  [Atende] Seletor falhou ({sel}): {e}")
 
     if not campo_usuario:
         print("❌ [Atende] Campo usuário não encontrado")
@@ -190,18 +231,23 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
     print("✏️  [Atende] Usuário digitado")
     await page.wait_for_timeout(1200)
 
-    # ── Campo senha ───────────────────────────────────────────
+    # type=password é confiável em qualquer framework JS
     seletores_senha = [
-        "input[name='senha']", "input[id='senha']",
         "input[type='password']",
+        "input[name='senha']",
+        "input[id='senha']",
+        "input[autocomplete='current-password']",
     ]
     campo_senha = None
     for sel in seletores_senha:
-        elem = page.locator(sel).first
-        if await elem.count() > 0:
-            print(f"✅ [Atende] Campo senha: {sel}")
-            campo_senha = elem
-            break
+        try:
+            elem = page.locator(sel).first
+            if await elem.count() > 0 and await elem.is_visible():
+                print(f"✅ [Atende] Campo senha: {sel}")
+                campo_senha = elem
+                break
+        except Exception:
+            pass
 
     if not campo_senha:
         print("❌ [Atende] Campo senha não encontrado")
