@@ -1,19 +1,24 @@
-fastapi==0.111.0
-uvicorn==0.29.0
+# API
+fastapi>=0.111,<0.112
+uvicorn[standard]>=0.29,<0.30
 
-# Playwright
-playwright==1.46.0
+# Automação / scraping
+playwright>=1.46,<1.47
+playwright-stealth>=2.0,<3.0
 
 # HTTP / async
-httpx==0.27.0
-anyio==4.3.0
+httpx>=0.27,<0.28
+anyio>=4.3,<5.0
 
-# Certificado
-cryptography==41.0.7
+# Segurança / certificado
+cryptography>=41,<42
 
-# Supabase
-supabase==2.4.6
+# Backend / integração
+supabase>=2.4,<3.0
 
-# Utils
-python-dotenv==1.0.1
-python-multipart==0.0.9
+# Config / utils
+python-dotenv>=1.0,<2.0
+python-multipart>=0.0.9,<0.1
+
+# Tipagem (compatível com FastAPI atual)
+pydantic>=2.6,<3.0
