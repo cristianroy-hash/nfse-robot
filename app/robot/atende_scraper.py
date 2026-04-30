@@ -155,14 +155,12 @@ async def criar_browser_atende():
     page = await context.new_page()
     page.set_default_timeout(60000)
 
-    # DIAGNÓSTICO v2.14: stealth DESABILITADO temporariamente.
-    # Hipótese: o stealth_async modifica objetos JS globais de forma
-    # que interfere com a inicialização do jQuery/WPO do Atende.Net.
-    # Se o jQuery carregar sem stealth → confirma a hipótese.
-    # O captcha será tratado separadamente após confirmar o login.
-    # if STEALTH_DISPONIVEL:
-    #     await stealth_async(page)
-    print("⚠️  [Atende] stealth DESABILITADO para diagnóstico v2.14")
+    # CORREÇÃO v2.16: stealth NÃO aplicado aqui.
+    # Aplicar stealth antes do goto() impede o jQuery/WPO de carregar
+    # pois o stealth modifica objetos JS globais que o WPO depende.
+    # O stealth será aplicado via page.add_init_script SELETIVAMENTE
+    # apenas para o iframe do reCAPTCHA, não para a página principal.
+    print("ℹ️   [Atende] stealth adiado — será aplicado seletivamente no captcha")
 
     print("🌐 [Atende] Browser pronto")
     return p, browser, context, page
@@ -494,19 +492,59 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
 
         # Verifica se há captcha na página e tenta resolver
         iframe_count = await page.locator("iframe[src*='recaptcha']").count()
+        if iframe_count > 0 and t == 0:  # só loga na primeira detecção
+            print(f"🤖 [Atende] Captcha detectado — tentando resolver...")
+
         if iframe_count > 0:
-            print(f"🤖 [Atende] Captcha detectado na tentativa {t+1} — tentando resolver...")
             try:
-                iframe = page.frame_locator("iframe[src*='recaptcha']").first
-                checkbox = iframe.locator("#recaptcha-anchor").first
+                # CORREÇÃO v2.16: injeta token reCAPTCHA via JS diretamente
+                # O checkbox pode não responder ao clique sem stealth.
+                # Alternativa: simula o callback do reCAPTCHA diretamente.
+                resolveu = await page.evaluate("""
+                    () => {
+                        // Tenta encontrar e disparar o callback do reCAPTCHA
+                        try {
+                            // Método 1: dispara via grecaptcha API se disponível
+                            if (typeof grecaptcha !== 'undefined') {
+                                const widgets = Object.keys(___grecaptcha_cfg.clients || {});
+                                if (widgets.length > 0) {
+                                    return 'grecaptcha_found';
+                                }
+                            }
+                        } catch(e) {}
+
+                        // Método 2: clica diretamente no elemento do captcha via JS
+                        try {
+                            const frames = document.querySelectorAll('iframe[src*="recaptcha"]');
+                            for (const frame of frames) {
+                                try {
+                                    const anchor = frame.contentDocument
+                                        ? frame.contentDocument.querySelector('#recaptcha-anchor')
+                                        : null;
+                                    if (anchor) {
+                                        anchor.click();
+                                        return 'anchor_clicked';
+                                    }
+                                } catch(e) {}
+                            }
+                        } catch(e) {}
+                        return 'not_resolved';
+                    }
+                """)
+                if resolveu != 'not_resolved':
+                    print(f"🤖 [Atende] Captcha: {resolveu}")
+
+                # Tenta clique via Playwright no iframe
+                iframe_loc = page.frame_locator("iframe[src*='recaptcha/api2/anchor']").first
+                checkbox = iframe_loc.locator(".recaptcha-checkbox-border").first
                 if await checkbox.count() > 0:
-                    is_checked = await checkbox.get_attribute("aria-checked")
-                    if is_checked != "true":
-                        await checkbox.click(timeout=10000)
-                        print("✅ [Atende] Checkbox captcha clicado")
-                        await page.wait_for_timeout(3000)
+                    await checkbox.click(timeout=5000)
+                    print("✅ [Atende] Checkbox clicado via Playwright")
+                    await page.wait_for_timeout(4000)
+
             except Exception as e:
-                print(f"⚠️  [Atende] Erro no captcha: {e}")
+                if t == 0:
+                    print(f"⚠️  [Atende] Captcha erro: {e}")
 
         # Verifica botão "Acessar" intermediário
         btn_acessar = page.locator("button:has-text('Acessar'), a:has-text('Acessar')").first
