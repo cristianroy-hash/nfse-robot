@@ -267,11 +267,30 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
 
         if not inputs_encontrados:
             html_resumo = await page.evaluate("""
-                () => document.body.innerHTML.substring(0, 2000)
+                () => document.body.innerHTML.substring(0, 8000)
             """)
-            print(f"📄 [Atende] HTML (2000 chars): {html_resumo}")
+            print(f"📄 [Atende] HTML (8000 chars): {html_resumo}")
+
+            # v2.8: inspeciona todos os frames — formulário pode estar em iframe
+            frames = page.frames
+            print(f"🖼️  [Atende] Total frames: {len(frames)}")
+            for i, frame in enumerate(frames):
+                try:
+                    frame_inputs = await frame.evaluate("""
+                        () => {
+                            const inputs = Array.from(document.querySelectorAll('input'));
+                            return inputs.map(inp => ({
+                                type: inp.type, name: inp.name,
+                                id: inp.id, placeholder: inp.placeholder,
+                                visible: inp.offsetParent !== null
+                            }));
+                        }
+                    """)
+                    print(f"   Frame {i} ({frame.url[:100]}): {frame_inputs}")
+                except Exception as fe:
+                    print(f"   Frame {i}: erro — {fe}")
+
             print("❌ [Atende] Formulário não apareceu mesmo após fechar popup")
-            await _screenshot_debug(page, "01_sem_formulario_final")
             return False
 
     await _screenshot_debug(page, "01_pagina_inicial")
