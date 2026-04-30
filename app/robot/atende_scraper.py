@@ -155,11 +155,14 @@ async def criar_browser_atende():
     page = await context.new_page()
     page.set_default_timeout(60000)
 
-    # CORREÇÃO v2.3: API correta — await stealth_async(page)
-    # aplicado antes do primeiro goto() para injetar patches JS
-    if STEALTH_DISPONIVEL:
-        await stealth_async(page)
-        print("🥷 [Atende] stealth_async aplicado")
+    # DIAGNÓSTICO v2.14: stealth DESABILITADO temporariamente.
+    # Hipótese: o stealth_async modifica objetos JS globais de forma
+    # que interfere com a inicialização do jQuery/WPO do Atende.Net.
+    # Se o jQuery carregar sem stealth → confirma a hipótese.
+    # O captcha será tratado separadamente após confirmar o login.
+    # if STEALTH_DISPONIVEL:
+    #     await stealth_async(page)
+    print("⚠️  [Atende] stealth DESABILITADO para diagnóstico v2.14")
 
     print("🌐 [Atende] Browser pronto")
     return p, browser, context, page
