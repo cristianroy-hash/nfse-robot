@@ -785,8 +785,8 @@ async def _clicar_acessar_e_resolver_captcha(page: Page) -> bool:
                                 }}
 
                                 // Método 2: fetch direto para rot=63064&aca=101
-                                const baseUrl = window.location.href.split('/nfse')[0] + '/';
-                                const endpoint = baseUrl + 'atende.php?rot=63064&aca=101&ajax=t&processo=processaDados&ajaxPrevent=' + Date.now();
+                                // URL correta: origin + /autoatendimento/servicos/atende.php
+                                const endpoint = window.location.origin + '/autoatendimento/servicos/atende.php?rot=63064&aca=101&ajax=t&processo=processaDados&ajaxPrevent=' + Date.now();
                                 const r = await fetch(endpoint, {{
                                     method: 'POST',
                                     headers: {{'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest'}},
@@ -794,7 +794,7 @@ async def _clicar_acessar_e_resolver_captcha(page: Page) -> bool:
                                     credentials: 'include'
                                 }});
                                 const txt = await r.text();
-                                return 'fetch_modal:' + r.status + ':' + txt.substring(0, 100);
+                                return 'fetch_modal:' + r.status + ':' + txt.substring(0, 200);
                             }} catch(e) {{
                                 return 'erro: ' + String(e);
                             }}
