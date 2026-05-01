@@ -155,33 +155,38 @@ async def criar_browser_atende():
     page = await context.new_page()
     page.set_default_timeout(60000)
 
-    # CORREÇÃO v2.25: intercepta TODAS as requisições relevantes para diagnóstico
+    # CORREÇÃO v2.27: intercepta requests E responses para diagnóstico completo
+    async def handle_request(request):
+        url = request.url
+        if 'atende.net' in url and request.method == 'POST':
+            try:
+                post_data = request.post_data or ''
+                # Mascara a senha nos logs
+                log_data = post_data[:300].replace('Cad1234@', '****')
+                print(f"📤 [Atende] REQUEST POST: {url[-60:]} | dados: {log_data}")
+            except Exception:
+                pass
+
     async def handle_response(response):
         url = response.url
-        # Intercepta respostas do portal Atende (login, validação)
-        if 'atende.net' in url and any(k in url for k in ['login', 'autent', 'acesso', 'usuario', 'valida']):
-            try:
-                status = response.status
-                body = await response.text()
-                print(f"🌐 [Atende] Resposta portal ({status}): {url[:80]} → {body[:200]}")
-            except Exception:
-                pass
-        # Intercepta reCAPTCHA
-        if 'recaptcha' in url and any(k in url for k in ['userverify', 'reload', 'anchor']):
-            try:
-                body = await response.text()
-                print(f"🤖 [Atende] reCAPTCHA ({response.status}): {url[-50:]} → {body[:200]}")
-            except Exception:
-                pass
-        # Intercepta qualquer POST do portal
         if 'atende.net' in url and response.request.method == 'POST':
             try:
                 status = response.status
                 body = await response.text()
-                print(f"📤 [Atende] POST ({status}): {url[-60:]} → {body[:300]}")
+                # Só loga POSTs relevantes (não imagens/css)
+                if any(k in url for k in ['processaDados', 'login', 'autent', 'Captcha', 'acesso']):
+                    print(f"📥 [Atende] RESPONSE POST ({status}): {url[-60:]}")
+                    print(f"   Body: {body[:400]}")
+            except Exception:
+                pass
+        if 'recaptcha' in url and 'userverify' in url:
+            try:
+                body = await response.text()
+                print(f"🤖 [Atende] reCAPTCHA verify ({response.status}): {body[:300]}")
             except Exception:
                 pass
 
+    page.on("request", handle_request)
     page.on("response", handle_response)
 
     # CORREÇÃO v2.16: stealth NÃO aplicado aqui.
