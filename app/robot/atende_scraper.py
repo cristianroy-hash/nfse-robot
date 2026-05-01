@@ -624,25 +624,43 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
         if t == 0:
             try:
                 url_agora = page.url
-                html_agora = await page.evaluate(
-                    "() => document.body.innerHTML.substring(6000, 14000)"
-                )
                 print(f"📄 [Atende] URL pós-Entrar: {url_agora}")
-                print(f"📄 [Atende] HTML pós-Entrar (6000-14000): {html_agora}")
 
-                botoes = await page.evaluate("""
-                    () => Array.from(document.querySelectorAll('button, a, input[type=button], input[type=submit]'))
-                        .map(el => ({
-                            tag: el.tagName,
-                            type: el.type || '',
-                            name: el.name || '',
-                            text: el.textContent.trim().substring(0, 60),
-                            class: el.className.substring(0, 80),
-                            href: el.href || '',
-                            visible: el.offsetParent !== null
-                        }))
+                # Captura só o texto visível da página — ignora CSS/style
+                texto_visivel = await page.evaluate("""
+                    () => {
+                        // Remove style e script tags
+                        const clone = document.body.cloneNode(true);
+                        clone.querySelectorAll('style, script').forEach(el => el.remove());
+                        return clone.innerText || clone.textContent || '';
+                    }
                 """)
-                print(f"🖱️  [Atende] TODOS os botões pós-Entrar: {botoes}")
+                print(f"📝 [Atende] Texto visível pós-Entrar: {texto_visivel[:3000]}")
+
+                # Lista todos os botões e links com texto
+                try:
+                    botoes = await page.evaluate("""
+                        () => {
+                            const els = Array.from(document.querySelectorAll(
+                                'button, a[href], input[type=button], input[type=submit], [onclick], [class*=botao], [class*=btn]'
+                            ));
+                            return els
+                                .filter(el => el.textContent.trim().length > 0)
+                                .map(el => ({
+                                    tag: el.tagName,
+                                    text: el.textContent.trim().substring(0, 60),
+                                    class: el.className.substring(0, 60),
+                                    visible: el.offsetParent !== null,
+                                    onclick: (el.getAttribute('onclick') || '').substring(0, 60)
+                                }));
+                        }
+                    """)
+                    print(f"🖱️  [Atende] Botões/links pós-Entrar ({len(botoes)}):")
+                    for b in botoes:
+                        v = '✅' if b['visible'] else '❌'
+                        print(f"   {v} {b['tag']} | '{b['text']}' | class='{b['class'][:40]}'")
+                except Exception as be:
+                    print(f"⚠️  [Atende] Erro listando botões: {be}")
             except Exception as e:
                 print(f"⚠️  [Atende] Diagnóstico: {e}")
 
