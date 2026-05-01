@@ -625,24 +625,24 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
             try:
                 url_agora = page.url
                 html_agora = await page.evaluate(
-                    "() => document.body.innerHTML.substring(0, 6000)"
+                    "() => document.body.innerHTML.substring(6000, 14000)"
                 )
                 print(f"📄 [Atende] URL pós-Entrar: {url_agora}")
-                print(f"📄 [Atende] HTML pós-Entrar: {html_agora}")
+                print(f"📄 [Atende] HTML pós-Entrar (6000-14000): {html_agora}")
 
                 botoes = await page.evaluate("""
                     () => Array.from(document.querySelectorAll('button, a, input[type=button], input[type=submit]'))
-                        .filter(el => el.offsetParent !== null)
                         .map(el => ({
                             tag: el.tagName,
                             type: el.type || '',
                             name: el.name || '',
-                            text: el.textContent.trim().substring(0, 50),
-                            class: el.className.substring(0, 60),
-                            href: el.href || ''
+                            text: el.textContent.trim().substring(0, 60),
+                            class: el.className.substring(0, 80),
+                            href: el.href || '',
+                            visible: el.offsetParent !== null
                         }))
                 """)
-                print(f"🖱️  [Atende] Botões visíveis pós-Entrar: {botoes}")
+                print(f"🖱️  [Atende] TODOS os botões pós-Entrar: {botoes}")
             except Exception as e:
                 print(f"⚠️  [Atende] Diagnóstico: {e}")
 
