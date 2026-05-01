@@ -913,18 +913,28 @@ async def _abrir_gerenciamento_notas(page: Page) -> bool:
         }
     """)
 
-    # PASSO 2: tenta navegar diretamente para o sistema via URL
-    # A URL do sistema após login é /?rot=1&aca=1#!/sistema/66
-    print("🌐 [Atende] Navegando para URL do sistema...")
+    # PASSO 2: aguarda o captcha ser resolvido e o sistema carregar
+    # O log mostrou que após clicar Acessar aparece o modal de captcha.
+    # Precisamos aguardar o captcha ser resolvido antes de navegar.
+    print("🌐 [Atende] Aguardando sistema após captcha...")
+    await page.wait_for_timeout(5000)
+    await _screenshot_debug(page, "12_sistema_url")
+
+    # Verifica se chegou no sistema #!/sistema/66
+    if "sistema" in page.url:
+        print(f"✅ [Atende] Sistema carregado: {page.url}")
+        return True
+
+    # Se ainda não está no sistema, tenta navegar diretamente
     try:
         base_url = page.url.split('/autoatendimento')[0]
         sistema_url = f"{base_url}/?rot=1&aca=1#!/sistema/66"
+        print(f"🌐 [Atende] Navegando para: {sistema_url}")
         await page.goto(sistema_url, wait_until="networkidle", timeout=30000)
         await page.wait_for_timeout(3000)
         print(f"✅ [Atende] Navegou para: {page.url}")
-        await _screenshot_debug(page, "12_sistema_url")
+        await _screenshot_debug(page, "12_sistema_navegado")
 
-        # Verifica se chegou no sistema
         if "sistema" in page.url or await page.locator("text=Gerenciamento").count() > 0:
             print("✅ [Atende] Sistema carregado via URL direta")
             return True
@@ -1036,7 +1046,7 @@ async def _filtrar_competencia_e_consultar(page: Page, data_inicio: str) -> bool
 
     if campo_data:
         await campo_data.scroll_into_view_if_needed()
-        await campo_data.triple_click()
+        await campo_data.click(click_count=3)
         await page.keyboard.type(competencia, delay=80)
         await campo_data.dispatch_event("input")
         await campo_data.dispatch_event("change")
