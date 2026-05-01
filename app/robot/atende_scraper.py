@@ -41,17 +41,33 @@ PORTAIS_ATENDE = {
     "nfse-saojose.atende.net": {
         "nome":     "São José/SC",
         "base_url": "https://nfse-saojose.atende.net",
-        "ws_url":   "https://nfse-saojose.atende.net/WsNFe2/LoteRps.jws",
+        # Endpoints IPM/Atende.Net — testados em ordem de prioridade
+        "ws_urls": [
+            "https://nfse-saojose.atende.net/WsNFe2/LoteRps.jws",
+            "https://nfse-saojose.atende.net/nfse/services/NFSeServices",
+            "https://nfse-saojose.atende.net/nfse/services/NFSeConsultas",
+            "https://nfse-saojose.atende.net/WsNfe/NfseServices",
+        ],
     },
     "nfse-palhoca.atende.net": {
         "nome":     "Palhoça/SC",
         "base_url": "https://nfse-palhoca.atende.net",
-        "ws_url":   "https://nfse-palhoca.atende.net/WsNFe2/LoteRps.jws",
+        "ws_urls": [
+            "https://nfse-palhoca.atende.net/WsNFe2/LoteRps.jws",
+            "https://nfse-palhoca.atende.net/nfse/services/NFSeServices",
+            "https://nfse-palhoca.atende.net/nfse/services/NFSeConsultas",
+            "https://nfse-palhoca.atende.net/WsNfe/NfseServices",
+        ],
     },
     "nfse-bigua.atende.net": {
         "nome":     "Biguaçu/SC",
         "base_url": "https://nfse-bigua.atende.net",
-        "ws_url":   "https://nfse-bigua.atende.net/WsNFe2/LoteRps.jws",
+        "ws_urls": [
+            "https://nfse-bigua.atende.net/WsNFe2/LoteRps.jws",
+            "https://nfse-bigua.atende.net/nfse/services/NFSeServices",
+            "https://nfse-bigua.atende.net/nfse/services/NFSeConsultas",
+            "https://nfse-bigua.atende.net/WsNfe/NfseServices",
+        ],
     },
 }
 
@@ -312,7 +328,7 @@ async def importar_via_atende(
         raise Exception(f"Portal não suportado: {portal_url}")
 
     municipio = config["nome"]
-    ws_url = config["ws_url"]
+    ws_url = config.get("ws_urls", [""])[0]  # URL principal (fallback)
 
     print(f"🏙️  [Atende SOAP] ══════════════════════════════")
     print(f"🏙️  [Atende SOAP] {municipio} | {data_inicio} → {data_fim}")
@@ -325,53 +341,56 @@ async def importar_via_atende(
 
     notas = []
     xml_resposta = None
+    ws_urls = config.get("ws_urls", [config.get("ws_url", "")])
 
-    # ── Tentativa 1: formato ABRASF padrão ───────────────────
-    print("🔄 [Atende SOAP] Tentativa 1: formato ABRASF padrão...")
-    soap1 = _montar_soap_consultar_nfse(cnpj, usuario, senha, data_inicio, data_fim)
-    xml_resposta = await _chamar_webservice(
-        ws_url,
-        soap1,
-        soap_action="http://nfse.abrasf.org.br/ConsultarNfseServicoPrestado"
-    )
+    # ── Testa todos os endpoints em ordem ────────────────────
+    for idx, ws_url_atual in enumerate(ws_urls):
+        print(f"🔄 [Atende SOAP] Endpoint {idx+1}/{len(ws_urls)}: {ws_url_atual}")
 
-    if xml_resposta and "Fault" not in xml_resposta and "<Nfse" in xml_resposta or (xml_resposta and "CompNfse" in xml_resposta):
-        notas = _parsear_notas_xml(xml_resposta)
-        print(f"✅ [Atende SOAP] Tentativa 1 OK — {len(notas)} notas")
-    else:
-        if xml_resposta:
-            print(f"⚠️  [Atende SOAP] Tentativa 1 sem notas: {xml_resposta[:200]}")
+        # Verifica se endpoint existe (GET)
+        async with httpx.AsyncClient(verify=False, timeout=10) as client:
+            try:
+                r = await client.get(f"{ws_url_atual}?WSDL")
+                print(f"   WSDL status: {r.status_code}")
+                if r.status_code == 404:
+                    print(f"   ❌ Endpoint 404 — pulando")
+                    continue
+                if r.status_code == 200:
+                    print(f"   ✅ WSDL encontrado: {r.text[:200]}")
+            except Exception as e:
+                print(f"   ⚠️  Erro ao verificar WSDL: {e}")
+                continue
 
-        # ── Tentativa 2: formato IPM alternativo ──────────────
-        print("🔄 [Atende SOAP] Tentativa 2: formato IPM alternativo...")
+        # Tentativa ABRASF padrão
+        soap1 = _montar_soap_consultar_nfse(cnpj, usuario, senha, data_inicio, data_fim)
+        resp = await _chamar_webservice(
+            ws_url_atual, soap1,
+            soap_action="http://nfse.abrasf.org.br/ConsultarNfseServicoPrestado"
+        )
+        if resp:
+            print(f"   Resposta ABRASF: {resp[:300]}")
+            notas_encontradas = _parsear_notas_xml(resp)
+            if notas_encontradas:
+                notas = notas_encontradas
+                xml_resposta = resp
+                print(f"✅ [Atende SOAP] ABRASF OK em {ws_url_atual} — {len(notas)} notas")
+                break
+
+        # Tentativa IPM alternativa
         soap2 = _montar_soap_ipm(cnpj, usuario, senha, data_inicio, data_fim)
-        xml_resposta2 = await _chamar_webservice(
-            ws_url,
-            soap2,
+        resp2 = await _chamar_webservice(
+            ws_url_atual, soap2,
             soap_action="consultarNfseServicoPrestado"
         )
-
-        if xml_resposta2:
-            print(f"   Resposta 2: {xml_resposta2[:300]}")
-            notas = _parsear_notas_xml(xml_resposta2)
-            if notas:
-                print(f"✅ [Atende SOAP] Tentativa 2 OK — {len(notas)} notas")
-            xml_resposta = xml_resposta2
-
-        # ── Tentativa 3: testa WSDL para verificar conectividade ──
-        if not xml_resposta:
-            print("🔄 [Atende SOAP] Tentativa 3: verificando WSDL...")
-            wsdl_url = f"{ws_url}?WSDL"
-            async with httpx.AsyncClient(verify=False, timeout=15) as client:
-                try:
-                    r = await client.get(wsdl_url)
-                    print(f"📄 [Atende SOAP] WSDL status: {r.status_code}")
-                    if r.status_code == 200:
-                        print(f"   WSDL preview: {r.text[:300]}")
-                    else:
-                        print(f"   WSDL erro: {r.text[:200]}")
-                except Exception as e:
-                    print(f"   WSDL erro de conexão: {e}")
+        if resp2:
+            print(f"   Resposta IPM: {resp2[:300]}")
+            notas_encontradas2 = _parsear_notas_xml(resp2)
+            if notas_encontradas2:
+                notas = notas_encontradas2
+                xml_resposta = resp2
+                print(f"✅ [Atende SOAP] IPM OK em {ws_url_atual} — {len(notas)} notas")
+                break
+            xml_resposta = resp2  # guarda mesmo sem notas para diagnóstico
 
     print(f"🏁 [Atende SOAP] Concluído — {len(notas)} nota(s) encontrada(s)")
 
