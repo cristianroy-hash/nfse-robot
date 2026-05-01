@@ -521,19 +521,61 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
         }}
     """)
 
-    # Passo 3: clica no botão removendo event listeners via cloneNode
-    resultado = await page.evaluate("""
-        () => {
-            const btn = document.querySelector("button[name='btn_entrar']");
-            if (!btn) return 'btn_nao_encontrado';
-            // cloneNode remove todos os event listeners do WPO
-            const clone = btn.cloneNode(true);
-            btn.parentNode.replaceChild(clone, btn);
-            clone.click();
-            return 'click_sem_listeners';
-        }
+    # Passo 3: envia o login via fetch direto ao endpoint do WPO
+    # bypassa completamente o handler JS que verifica o reCAPTCHA
+    # O endpoint real é o mesmo que processa os dados do formulário
+    resultado = await page.evaluate(f"""
+        async () => {{
+            try {{
+                const usuario = document.querySelector('[name="login_usuario"]')?.value || '';
+                const senha = document.querySelector('[name="senha_usuario"]')?.value || '';
+                const token = '{token_atual or ""}';
+                const url = window.location.href;
+
+                // Monta os parâmetros exatamente como o WPO enviaria
+                const params = new URLSearchParams();
+                params.append('login_usuario', usuario);
+                params.append('senha_usuario', senha);
+                params.append('g-recaptcha-response', token);
+                params.append('chave', 'null');
+                params.append('caller', 'null');
+                params.append('parametro', '{{}}');
+                params.append('autoId', '1');
+                params.append('monitor', '0');
+                params.append('flush', '0');
+                params.append('versaoSistema', 'v2');
+                params.append('portalCidadao', 'true');
+
+                // Tenta fetch para o endpoint de login do WPO
+                const resp = await fetch(url, {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }},
+                    body: params.toString(),
+                    credentials: 'include'
+                }});
+                const text = await resp.text();
+                return 'fetch_ok:' + resp.status + ':' + text.substring(0, 100);
+            }} catch(e) {{
+                return 'fetch_erro: ' + String(e);
+            }}
+        }}
     """)
     print(f"✅ [Atende] Submit v2.28: {resultado}")
+
+    # Também tenta o clique normal como fallback
+    await page.evaluate("""
+        () => {
+            const btn = document.querySelector("button[name='btn_entrar']");
+            if (btn) {
+                const clone = btn.cloneNode(true);
+                btn.parentNode.replaceChild(clone, btn);
+                clone.click();
+            }
+        }
+    """)
     btn_clicado = True
 
     if not btn_clicado:
