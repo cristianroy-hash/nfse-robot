@@ -525,6 +525,33 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
             print(f"✅ [Atende] Login ok — janela IPM detectada com links: {janela_ipm}")
             return True
 
+        # Diagnóstico na tentativa 3 para não poluir demais os logs
+        if t == 2:
+            try:
+                janela_html = await page.evaluate("""
+                    () => {
+                        // Verifica presença de elementos chave da janela IPM
+                        const checks = {
+                            janela_ipm: !!document.querySelector('.janela_ipm'),
+                            janela_ipm_frame: !!document.querySelector('.janela_ipm_frame'),
+                            container_servico: !!document.querySelector('.container-servico-fiscal'),
+                            bloco_acesso: !!document.querySelector('.bloco-acesso-servico-fiscal'),
+                            btn_acessar_count: document.querySelectorAll('button').length,
+                            todos_botoes: Array.from(document.querySelectorAll('button'))
+                                .map(b => b.textContent.trim().substring(0,30)),
+                            links_visiveis: Array.from(document.querySelectorAll('a'))
+                                .filter(a => a.offsetParent !== null)
+                                .map(a => a.textContent.trim().substring(0,40))
+                                .filter(t => t.length > 2)
+                        };
+                        return checks;
+                    }
+                """)
+                print(f"🔍 [Atende] DOM tentativa 3: {janela_html}")
+                await _screenshot_debug(page, "07_dom_diagnostico")
+            except Exception as e:
+                print(f"⚠️  [Atende] Diagnóstico: {e}")
+
         print(f"   Tentativa {t+1}/15 — URL: {url_atual[:80]}")
 
     print(f"❌ [Atende] Timeout. URL final: {page.url}")
