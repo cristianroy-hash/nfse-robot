@@ -553,12 +553,35 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
             return True
 
         if t == 2:
-            # Diagnóstico na tentativa 3
-            botoes = await page.evaluate("""
-                () => Array.from(document.querySelectorAll('button'))
-                    .map(b => ({name: b.name, text: b.textContent.trim(), visible: b.offsetParent !== null}))
+            # Diagnóstico na tentativa 3 — busca mais ampla
+            diag = await page.evaluate("""
+                () => {
+                    // Todos os elementos clicáveis com texto
+                    const clicaveis = Array.from(document.querySelectorAll(
+                        'button, input[type=button], input[type=submit], a, [onclick], [class*=botao], [class*=btn]'
+                    )).filter(el => el.textContent.trim().length > 0 || el.value)
+                      .map(el => ({
+                          tag: el.tagName,
+                          name: el.name || '',
+                          value: el.value || '',
+                          text: el.textContent.trim().substring(0,30),
+                          class: el.className.substring(0,50),
+                          visible: el.offsetParent !== null
+                      })).filter(el => el.visible);
+                    return clicaveis;
+                }
             """)
-            print(f"🔍 [Atende] Botões na tentativa 3: {botoes}")
+            print(f"🔍 [Atende] Elementos clicáveis visíveis tentativa 3: {diag}")
+
+            # Verifica texto visível da página
+            texto = await page.evaluate("""
+                () => {
+                    const clone = document.body.cloneNode(true);
+                    clone.querySelectorAll('style,script').forEach(e => e.remove());
+                    return (clone.innerText || clone.textContent || '').substring(0, 500);
+                }
+            """)
+            print(f"📝 [Atende] Texto visível tentativa 3: {texto}")
 
         print(f"   Aguardando tela IPM... {t+1}/20")
 
