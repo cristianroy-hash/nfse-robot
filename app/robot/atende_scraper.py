@@ -497,50 +497,79 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
 
         if iframe_count > 0:
             try:
-                # CORREÇÃO v2.16: injeta token reCAPTCHA via JS diretamente
-                # O checkbox pode não responder ao clique sem stealth.
-                # Alternativa: simula o callback do reCAPTCHA diretamente.
-                resolveu = await page.evaluate("""
-                    () => {
-                        // Tenta encontrar e disparar o callback do reCAPTCHA
-                        try {
-                            // Método 1: dispara via grecaptcha API se disponível
-                            if (typeof grecaptcha !== 'undefined') {
-                                const widgets = Object.keys(___grecaptcha_cfg.clients || {});
-                                if (widgets.length > 0) {
-                                    return 'grecaptcha_found';
-                                }
-                            }
-                        } catch(e) {}
+                # CORREÇÃO v2.17: o grecaptcha está disponível (confirmado nos logs).
+                # Estratégia: inspeciona os widgets do grecaptcha para encontrar
+                # o callback e o sitekey, depois usa a API pública do grecaptcha
+                # para executar o challenge comportamental sem interação visual.
+                #
+                # O reCAPTCHA v2 checkbox comportamental analisa:
+                # - movimentos de mouse anteriores ao clique
+                # - histórico de navegação no contexto
+                # - fingerprint do browser
+                # Sem stealth, o browser é detectado como headless e o captcha
+                # nunca marca como "humano" independente de cliques.
+                #
+                # Solução real sem custo: mover o mouse de forma realista
+                # ANTES de clicar no checkbox para simular comportamento humano.
 
-                        // Método 2: clica diretamente no elemento do captcha via JS
+                # Passo 1: inspeciona o widget do grecaptcha
+                info_captcha = await page.evaluate("""
+                    () => {
                         try {
-                            const frames = document.querySelectorAll('iframe[src*="recaptcha"]');
-                            for (const frame of frames) {
+                            const cfg = ___grecaptcha_cfg;
+                            if (!cfg || !cfg.clients) return {erro: 'sem_cfg'};
+                            const clientes = Object.values(cfg.clients);
+                            const info = clientes.map(c => {
                                 try {
-                                    const anchor = frame.contentDocument
-                                        ? frame.contentDocument.querySelector('#recaptcha-anchor')
-                                        : null;
-                                    if (anchor) {
-                                        anchor.click();
-                                        return 'anchor_clicked';
-                                    }
-                                } catch(e) {}
-                            }
-                        } catch(e) {}
-                        return 'not_resolved';
+                                    return {
+                                        sitekey: c.U?.sitekey || c.sitekey || '',
+                                        callback: typeof c.U?.callback === 'function' ? 'sim' : 'nao',
+                                        action: c.U?.action || ''
+                                    };
+                                } catch(e) { return {erro: String(e)}; }
+                            });
+                            return {clientes: info, total: clientes.length};
+                        } catch(e) { return {erro: String(e)}; }
                     }
                 """)
-                if resolveu != 'not_resolved':
-                    print(f"🤖 [Atende] Captcha: {resolveu}")
+                print(f"🔍 [Atende] Info grecaptcha: {info_captcha}")
 
-                # Tenta clique via Playwright no iframe
+                # Passo 2: simula movimento de mouse realista antes do clique
+                # O reCAPTCHA comportamental analisa trajetória do mouse
                 iframe_loc = page.frame_locator("iframe[src*='recaptcha/api2/anchor']").first
                 checkbox = iframe_loc.locator(".recaptcha-checkbox-border").first
+
                 if await checkbox.count() > 0:
-                    await checkbox.click(timeout=5000)
-                    print("✅ [Atende] Checkbox clicado via Playwright")
-                    await page.wait_for_timeout(4000)
+                    # Obtém posição do checkbox na página
+                    box = await page.locator("iframe[src*='recaptcha/api2/anchor']").first.bounding_box()
+                    if box:
+                        # Movimento de mouse gradual simulando usuário humano
+                        cx = box['x'] + box['width'] * 0.15  # posição do checkbox no iframe
+                        cy = box['y'] + box['height'] * 0.5
+
+                        # Move o mouse em curva até o checkbox
+                        await page.mouse.move(100, 300)  # posição inicial distante
+                        await page.wait_for_timeout(200)
+                        await page.mouse.move(cx - 100, cy + 30)
+                        await page.wait_for_timeout(150)
+                        await page.mouse.move(cx - 30, cy + 5)
+                        await page.wait_for_timeout(100)
+                        await page.mouse.move(cx, cy)
+                        await page.wait_for_timeout(80)
+
+                        # Clica após movimento realista
+                        await checkbox.click(timeout=8000)
+                        print("✅ [Atende] Checkbox clicado após movimento de mouse")
+                        await page.wait_for_timeout(5000)
+
+                        # Verifica se o captcha foi resolvido
+                        checked = await iframe_loc.locator(
+                            ".recaptcha-checkbox[aria-checked='true']"
+                        ).count()
+                        if checked > 0:
+                            print("✅ [Atende] Captcha RESOLVIDO!")
+                        else:
+                            print("⚠️  [Atende] Captcha ainda não marcado")
 
             except Exception as e:
                 if t == 0:
