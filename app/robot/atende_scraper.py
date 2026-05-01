@@ -155,19 +155,30 @@ async def criar_browser_atende():
     page = await context.new_page()
     page.set_default_timeout(60000)
 
-    # CORREÇÃO v2.21: intercepta respostas do reCAPTCHA para diagnóstico
-    # e tenta interceptar a validação para forçar aprovação do token.
+    # CORREÇÃO v2.25: intercepta TODAS as requisições relevantes para diagnóstico
     async def handle_response(response):
-        if 'recaptcha' in response.url and 'userverify' in response.url:
+        url = response.url
+        # Intercepta respostas do portal Atende (login, validação)
+        if 'atende.net' in url and any(k in url for k in ['login', 'autent', 'acesso', 'usuario', 'valida']):
             try:
+                status = response.status
                 body = await response.text()
-                print(f"🔍 [Atende] reCAPTCHA userverify response: {body[:300]}")
+                print(f"🌐 [Atende] Resposta portal ({status}): {url[:80]} → {body[:200]}")
             except Exception:
                 pass
-        if 'recaptcha' in response.url and 'reload' in response.url:
+        # Intercepta reCAPTCHA
+        if 'recaptcha' in url and any(k in url for k in ['userverify', 'reload', 'anchor']):
             try:
                 body = await response.text()
-                print(f"🔍 [Atende] reCAPTCHA reload response: {body[:300]}")
+                print(f"🤖 [Atende] reCAPTCHA ({response.status}): {url[-50:]} → {body[:200]}")
+            except Exception:
+                pass
+        # Intercepta qualquer POST do portal
+        if 'atende.net' in url and response.request.method == 'POST':
+            try:
+                status = response.status
+                body = await response.text()
+                print(f"📤 [Atende] POST ({status}): {url[-60:]} → {body[:300]}")
             except Exception:
                 pass
 
@@ -493,86 +504,67 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
         await _screenshot_debug(page, "05_erro_botao")
         return False
 
-    # CORREÇÃO v2.23: após clicar Entrar, o portal abre uma janela IPM
-    # (janela_ipm / container-servico-fiscal) com links de serviços fiscais.
-    # Isso CONFIRMA que o login foi bem-sucedido — não é captcha.
-    # A URL pode não mudar (SPA), mas o DOM muda completamente.
-    print("⏳ [Atende] Aguardando login ser processado...")
+    # CORREÇÃO v2.26: após clicar Entrar o WPO processa o login e abre
+    # a janela IPM com logo "ipm fiscal" e botão "Acessar" azul.
+    # Confirmado nas screenshots: o login NÃO tem captcha.
+    # O captcha aparece DEPOIS ao clicar o botão Acessar.
+    # Verificamos por múltiplos sinais no DOM.
+    print("⏳ [Atende] Aguardando tela IPM pós-login...")
     for t in range(20):
         await page.wait_for_timeout(3000)
         url_atual = page.url
 
-        # Verifica se URL mudou para sistema
+        # Verifica se URL mudou para sistema (captcha já resolvido)
         if "sistema" in url_atual:
-            print(f"✅ [Atende] Login ok via URL: {url_atual}")
+            print(f"✅ [Atende] Sistema carregado: {url_atual}")
             return True
 
-        # CORREÇÃO v2.24: verifica se a janela IPM apareceu no DOM.
-        # O HTML real mostrou id="janela_TIMESTAMP" e classes dinâmicas.
-        # Verificamos por múltiplos sinais: botão Acessar azul, logo IPM,
-        # ou presença de links de serviços fiscais.
-        janela_ipm = await page.evaluate("""
+        # Verifica presença da tela IPM com botão Acessar
+        sinal = await page.evaluate("""
             () => {
-                // Sinal 1: janela com id começando por "janela_"
-                const janelasId = Array.from(document.querySelectorAll('[id^="janela_"]'));
-                if (janelasId.length > 0) return 'janela_id_encontrada';
+                // Sinal mais confiável: botão "Acessar" visível que não é btn_entrar
+                const btns = Array.from(document.querySelectorAll('button, input[value="Acessar"]'));
+                for (const b of btns) {
+                    const txt = b.textContent.trim();
+                    const name = b.getAttribute('name') || '';
+                    if (txt === 'Acessar' && name !== 'btn_entrar' && b.offsetParent !== null) {
+                        return 'botao_acessar_visivel';
+                    }
+                }
 
-                // Sinal 2: classe janela_ipm ou container-servico-fiscal
-                const janela = document.querySelector(
-                    '.janela_ipm, .container-servico-fiscal, .janela_ipm_frame, .bloco-acesso-servico-fiscal'
-                );
-                if (janela) return 'janela_classe_encontrada';
+                // Sinal 2: janela com id "janela_TIMESTAMP"
+                if (document.querySelector('[id^="janela_"]')) return 'janela_id';
 
-                // Sinal 3: botão "Acessar" azul da IPM (não é o btn_entrar do login)
-                const btns = Array.from(document.querySelectorAll('button, input[type=button]'));
-                const btnAcessar = btns.find(b =>
-                    b.textContent.trim() === 'Acessar' && b.name !== 'btn_entrar'
-                );
-                if (btnAcessar) return 'botao_acessar_encontrado';
+                // Sinal 3: classes específicas da tela IPM
+                if (document.querySelector('.janela_ipm, .container-servico-fiscal')) return 'janela_classe';
 
-                // Sinal 4: logo IPM fiscal
-                const logoIpm = document.querySelector('[class*="logo-ipm"], [alt*="ipm"], img[src*="ipm"]');
-                if (logoIpm) return 'logo_ipm_encontrado';
+                // Sinal 4: imagem do logo IPM
+                const imgs = Array.from(document.querySelectorAll('img'));
+                if (imgs.some(img => (img.src || '').includes('ipm') || (img.alt || '').toLowerCase().includes('ipm'))) {
+                    return 'logo_ipm';
+                }
 
                 return null;
             }
         """)
 
-        if janela_ipm:
-            print(f"✅ [Atende] Login ok — {janela_ipm}")
+        if sinal:
+            print(f"✅ [Atende] Tela IPM detectada ({sinal}) — login bem-sucedido!")
             return True
 
-        # Diagnóstico na tentativa 3 para não poluir demais os logs
         if t == 2:
-            try:
-                janela_html = await page.evaluate("""
-                    () => {
-                        // Verifica presença de elementos chave da janela IPM
-                        const checks = {
-                            janela_ipm: !!document.querySelector('.janela_ipm'),
-                            janela_ipm_frame: !!document.querySelector('.janela_ipm_frame'),
-                            container_servico: !!document.querySelector('.container-servico-fiscal'),
-                            bloco_acesso: !!document.querySelector('.bloco-acesso-servico-fiscal'),
-                            btn_acessar_count: document.querySelectorAll('button').length,
-                            todos_botoes: Array.from(document.querySelectorAll('button'))
-                                .map(b => b.textContent.trim().substring(0,30)),
-                            links_visiveis: Array.from(document.querySelectorAll('a'))
-                                .filter(a => a.offsetParent !== null)
-                                .map(a => a.textContent.trim().substring(0,40))
-                                .filter(t => t.length > 2)
-                        };
-                        return checks;
-                    }
-                """)
-                print(f"🔍 [Atende] DOM tentativa 3: {janela_html}")
-                await _screenshot_debug(page, "07_dom_diagnostico")
-            except Exception as e:
-                print(f"⚠️  [Atende] Diagnóstico: {e}")
+            # Diagnóstico na tentativa 3
+            botoes = await page.evaluate("""
+                () => Array.from(document.querySelectorAll('button'))
+                    .map(b => ({name: b.name, text: b.textContent.trim(), visible: b.offsetParent !== null}))
+            """)
+            print(f"🔍 [Atende] Botões na tentativa 3: {botoes}")
 
-        print(f"   Tentativa {t+1}/15 — URL: {url_atual[:80]}")
+        print(f"   Aguardando tela IPM... {t+1}/20")
 
-    print(f"❌ [Atende] Timeout. URL final: {page.url}")
+    print(f"❌ [Atende] Tela IPM não apareceu. URL: {page.url}")
     return False
+
 async def _clicar_acessar_e_resolver_captcha(page: Page) -> bool:
     """
     Fluxo real confirmado pelas screenshots (01/05/2026):
@@ -766,7 +758,11 @@ async def _aguardar_sistema_e_fechar_popup(page: Page):
 # PASSO 8: CARD "GERENCIAMENTO DE NOTAS"
 # ============================================================
 async def _abrir_gerenciamento_notas(page: Page) -> bool:
-    # CORREÇÃO v2.23: o log revelou que após o login aparece a janela IPM
+    # CORREÇÃO v2.26: fluxo confirmado pelas screenshots (01/05/2026):
+    #   1. Após captcha → sistema #!/sistema/66 carrega
+    #   2. Popup "Avisos" aparece → fechar com botão "Fechar"
+    #   3. Painel do Gestor mostra card "Gerenciamento de Notas"
+    #   4. Clicar no card abre a tela de consulta de NFS-e
     # com links de serviços fiscais. O correto é clicar em um desses links
     # para abrir o sistema de NFS-e. Os links disponíveis identificados:
     #   - "Web Service de Emissão de Nota Fiscal Eletrônica"
@@ -807,35 +803,57 @@ async def _abrir_gerenciamento_notas(page: Page) -> bool:
         print(f"⚠️  [Atende] Navegação direta falhou: {e}")
 
     # PASSO 3: tenta clicar nos links da janela IPM
-    seletores_ipm = [
+    # PASSO 1: fecha popup "Avisos" que aparece ao entrar no sistema
+    print("🔔 [Atende] Fechando popup de Avisos...")
+    for sel_fechar in ["button:has-text('Fechar')", "input[value='Fechar']",
+                        "[class*='wpo-fechar']", "button:has-text('OK')"]:
+        elem = page.locator(sel_fechar).first
+        if await elem.count() > 0:
+            try:
+                await elem.click(force=True, timeout=3000)
+                print(f"✅ [Atende] Popup Avisos fechado: {sel_fechar}")
+                await page.wait_for_timeout(1500)
+                break
+            except Exception:
+                pass
+
+    await _screenshot_debug(page, "12_pos_avisos")
+
+    # PASSO 2: clica no card "Gerenciamento de Notas" do Painel do Gestor
+    # Confirmado na screenshot 6: card com texto "Gerenciamento de Notas"
+    print("🗂️  [Atende] Clicando no card 'Gerenciamento de Notas'...")
+    seletores_card = [
+        "text=Gerenciamento de Notas",
+        ":text('Gerenciamento de Notas')",
+        "div:has-text('Gerenciamento de Notas')",
         "a:has-text('Gerenciamento de Notas')",
-        "a:has-text('Gerenciamento')",
-        # Links identificados nos logs
-        "a:has-text('Web Service de Emissão')",
-        "a:has-text('Importação de Documentos Fiscais')",
-        "a[href*='sistema']",
-        "a[href*='nfse']",
-        ".janela_ipm a",
-        ".container-servico-fiscal a",
+        "[class*='card']:has-text('Gerenciamento')",
+        "div[class*='item']:has-text('Gerenciamento')",
+        # Fallback pelo texto parcial
+        "text=Gerenciamento",
     ]
 
-    for sel in seletores_ipm:
+    for sel in seletores_card:
         try:
             elem = page.locator(sel).first
             if await elem.count() > 0:
-                href = await elem.get_attribute('href') or ''
-                texto = await elem.inner_text()
-                print(f"🖱️  [Atende] Clicando: '{texto.strip()[:50]}' ({sel})")
+                print(f"🖱️  [Atende] Card encontrado: {sel}")
                 await elem.click(force=True, timeout=5000)
                 await page.wait_for_timeout(3000)
-                await _screenshot_debug(page, "12_pos_clique_ipm")
-                print(f"✅ [Atende] URL após clique: {page.url}")
+                await _screenshot_debug(page, "13_gerenciamento_notas")
+                print(f"✅ [Atende] Card clicado — URL: {page.url}")
                 return True
         except Exception as e:
-            print(f"⚠️  [Atende] Falhou ({sel}): {e}")
+            print(f"⚠️  [Atende] Card falhou ({sel}): {e}")
 
-    print("❌ [Atende] Não conseguiu navegar para o sistema")
-    await _screenshot_debug(page, "12_erro_navegacao")
+    # Diagnóstico se não encontrou
+    elementos = await page.evaluate("""
+        () => Array.from(document.querySelectorAll('*'))
+            .filter(el => el.textContent.trim() === 'Gerenciamento de Notas' && el.offsetParent !== null)
+            .map(el => ({tag: el.tagName, class: el.className.substring(0,60)}))
+    """)
+    print(f"🔍 [Atende] Elementos 'Gerenciamento de Notas': {elementos}")
+    await _screenshot_debug(page, "12_erro_card")
     return False
 
 
