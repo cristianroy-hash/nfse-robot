@@ -497,95 +497,104 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
 
         if iframe_count > 0:
             try:
-                # CORREÇÃO v2.19: é reCAPTCHA v2 INVISIBLE (size=invisible).
-                # Confirmado pelo iframe URL:
-                #   k=6LdPM3ksAAAAAJuwC8jAVFyDghcb8Aj804E9SFQp&size=invisible
-                # NÃO tem checkbox — executa em background e chama callback
-                # automaticamente quando aprova o usuário.
-                # O token já é gerado e fica em #recaptcha-token no iframe.
-                #
-                # Estratégia: lê o token gerado pelo reCAPTCHA invisible,
-                # injeta no campo g-recaptcha-response da página principal
-                # e dispara o callback/submit manualmente.
+                # CORREÇÃO v2.20: o token do reCAPTCHA invisible não é acessível
+                # via contentDocument (cross-origin iframe google.com).
+                # Usamos o Playwright frame API para acessar o frame diretamente.
+                # Além disso, o reCAPTCHA invisible gera o token APÓS execução
+                # e o deposita em g-recaptcha-response na página principal.
 
-                resultado = await page.evaluate("""
-                    () => {
-                        try {
-                            // Passo 1: encontra o token no iframe do reCAPTCHA
-                            let token = null;
+                # Passo 1: tenta ler token do frame do reCAPTCHA via Playwright
+                token = None
+                for frame in page.frames:
+                    if 'recaptcha' in frame.url and 'anchor' in frame.url:
+                        try:
+                            token_val = await frame.evaluate(
+                                "() => { const el = document.getElementById('recaptcha-token'); return el ? el.value : null; }"
+                            )
+                            if token_val:
+                                token = token_val
+                                print(f"✅ [Atende] Token lido do frame: {token[:30]}...")
+                                break
+                        except Exception as fe:
+                            print(f"⚠️  [Atende] Erro lendo frame: {fe}")
 
-                            // Tenta ler do iframe via frames da página
-                            const iframes = document.querySelectorAll('iframe[src*="recaptcha"]');
-                            for (const iframe of iframes) {
-                                try {
-                                    const tokenEl = iframe.contentDocument
-                                        ? iframe.contentDocument.querySelector('#recaptcha-token')
-                                        : null;
-                                    if (tokenEl && tokenEl.value) {
-                                        token = tokenEl.value;
-                                        break;
-                                    }
-                                } catch(e) {}
-                            }
+                # Passo 2: tenta ler g-recaptcha-response da página principal
+                if not token:
+                    token = await page.evaluate("""
+                        () => {
+                            const el = document.querySelector('[name="g-recaptcha-response"]');
+                            return el ? el.value : null;
+                        }
+                    """)
+                    if token:
+                        print(f"✅ [Atende] Token em g-recaptcha-response: {token[:30]}...")
 
-                            // Passo 2: injeta o token no campo g-recaptcha-response
-                            if (token) {
-                                // Campo oculto que o servidor valida
-                                let field = document.querySelector('[name="g-recaptcha-response"]');
-                                if (!field) {
-                                    field = document.createElement('textarea');
-                                    field.name = 'g-recaptcha-response';
-                                    field.style.display = 'none';
-                                    document.body.appendChild(field);
-                                }
-                                field.value = token;
-
-                                // Passo 3: dispara o callback do grecaptcha
-                                try {
-                                    const cfg = ___grecaptcha_cfg;
-                                    if (cfg && cfg.clients) {
-                                        for (const client of Object.values(cfg.clients)) {
-                                            // Tenta callback direto
-                                            if (typeof client.callback === 'function') {
-                                                client.callback(token);
-                                                return 'callback_direto';
-                                            }
-                                            // Tenta via execute
-                                            if (client.promise_callback) {
-                                                client.promise_callback(token);
-                                                return 'promise_callback';
-                                            }
-                                        }
-                                    }
-                                } catch(e) {}
-
-                                // Passo 4: dispara submit do formulário diretamente
-                                const form = document.querySelector('form');
-                                if (form) {
-                                    form.submit();
-                                    return 'form_submit';
-                                }
-
-                                return 'token_injetado_sem_callback';
-                            }
-
-                            // Passo 5: se não achou token, força execução do captcha
+                # Passo 3: força execução do grecaptcha para gerar o token
+                if not token:
+                    print("🔄 [Atende] Forçando grecaptcha.execute()...")
+                    await page.evaluate("""
+                        () => {
                             try {
                                 if (typeof grecaptcha !== 'undefined') {
+                                    // execute() dispara o reCAPTCHA invisible
+                                    // e chama o callback quando aprovado
                                     grecaptcha.execute();
-                                    return 'execute_chamado';
                                 }
                             } catch(e) {}
-
-                            return 'sem_token';
-                        } catch(e) {
-                            return 'erro: ' + String(e);
                         }
-                    }
-                """)
-                if t == 0 or resultado not in ['sem_token', 'execute_chamado']:
-                    print(f"🤖 [Atende] reCAPTCHA invisible: {resultado}")
-                await page.wait_for_timeout(3000)
+                    """)
+                    await page.wait_for_timeout(5000)
+
+                    # Aguarda o token aparecer após execute()
+                    token = await page.evaluate("""
+                        () => {
+                            const el = document.querySelector('[name="g-recaptcha-response"]');
+                            return el ? el.value : null;
+                        }
+                    """)
+                    if token:
+                        print(f"✅ [Atende] Token após execute(): {token[:30]}...")
+
+                # Passo 4: injeta token e dispara callback
+                if token:
+                    resultado = await page.evaluate(f"""
+                        () => {{
+                            const token = '{token}';
+
+                            // Injeta em todos os campos g-recaptcha-response
+                            document.querySelectorAll('[name="g-recaptcha-response"]').forEach(el => {{
+                                el.value = token;
+                            }});
+
+                            // Dispara callback do grecaptcha
+                            try {{
+                                const cfg = ___grecaptcha_cfg;
+                                if (cfg && cfg.clients) {{
+                                    for (const client of Object.values(cfg.clients)) {{
+                                        for (const key of Object.keys(client)) {{
+                                            if (client[key] && typeof client[key].callback === 'function') {{
+                                                client[key].callback(token);
+                                                return 'callback_' + key;
+                                            }}
+                                        }}
+                                    }}
+                                }}
+                            }} catch(e) {{}}
+
+                            // Tenta submit do form como fallback
+                            const btn = document.querySelector("button[name='btn_entrar']");
+                            if (btn) {{ btn.click(); return 'btn_entrar_click'; }}
+
+                            const form = document.querySelector('form');
+                            if (form) {{ form.submit(); return 'form_submit'; }}
+
+                            return 'token_sem_callback';
+                        }}
+                    """)
+                    print(f"🤖 [Atende] Resultado injeção token: {resultado}")
+                    await page.wait_for_timeout(4000)
+                else:
+                    print(f"⚠️  [Atende] Token não disponível na tentativa {t+1}")
 
             except Exception as e:
                 if t == 0:
