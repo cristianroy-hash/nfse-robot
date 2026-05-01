@@ -754,54 +754,59 @@ async def _clicar_acessar_e_resolver_captcha(page: Page) -> bool:
             await _screenshot_debug(page, f"08_captcha_{tentativa}")
 
             try:
-                # Tenta clicar no checkbox dentro do iframe
-                iframe_loc = page.frame_locator("iframe[src*='recaptcha/api2/anchor']").first
-                checkbox = iframe_loc.locator(".recaptcha-checkbox-border, #recaptcha-anchor").first
+                # CORREÇÃO v2.32: usa processaAcessoToken com token do modal
+                # O servidor exige validação via rot=63064&aca=101&processo=processaDados
+                # com token do reCAPTCHA. Chama processaAcessoToken diretamente.
 
-                if await checkbox.count() > 0:
-                    # Movimento de mouse simulando humano antes do clique
-                    box = await page.locator("iframe[src*='recaptcha']").first.bounding_box()
-                    if box:
-                        await page.mouse.move(400, 400)
-                        await page.wait_for_timeout(300)
-                        await page.mouse.move(box['x'] + 20, box['y'] + 30)
-                        await page.wait_for_timeout(200)
+                # Lê token do frame do reCAPTCHA do modal
+                token_modal = None
+                for frame in page.frames:
+                    if 'recaptcha' in frame.url and 'anchor' in frame.url:
+                        try:
+                            token_modal = await frame.evaluate(
+                                "() => { const el = document.getElementById('recaptcha-token'); return el ? el.value : null; }"
+                            )
+                            if token_modal:
+                                print(f"✅ [Atende] Token modal reCAPTCHA: {token_modal[:30]}...")
+                        except Exception:
+                            pass
+                        break
 
-                    await checkbox.click(timeout=8000)
-                    print("✅ [Atende] Checkbox 'Não sou um robô' clicado!")
-                    await page.wait_for_timeout(5000)
-                    await _screenshot_debug(page, "09_pos_captcha")
+                if token_modal:
+                    # Chama processaAcessoToken com o token do modal
+                    resultado_modal = await page.evaluate(f"""
+                        async () => {{
+                            const token = '{token_modal}';
+                            try {{
+                                // Método 1: processaAcessoToken do modal
+                                if (typeof processaAcessoToken === 'function') {{
+                                    processaAcessoToken(token);
+                                    return 'processaAcessoToken_modal_ok';
+                                }}
+
+                                // Método 2: fetch direto para rot=63064&aca=101
+                                const baseUrl = window.location.href.split('/nfse')[0] + '/';
+                                const endpoint = baseUrl + 'atende.php?rot=63064&aca=101&ajax=t&processo=processaDados&ajaxPrevent=' + Date.now();
+                                const r = await fetch(endpoint, {{
+                                    method: 'POST',
+                                    headers: {{'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest'}},
+                                    body: 'g-recaptcha-response=' + encodeURIComponent(token) + '&chave=null&caller=null&parametro=%7B%7D&autoId=1&monitor=0&flush=0&versaoSistema=v2&portalCidadao=true',
+                                    credentials: 'include'
+                                }});
+                                const txt = await r.text();
+                                return 'fetch_modal:' + r.status + ':' + txt.substring(0, 100);
+                            }} catch(e) {{
+                                return 'erro: ' + String(e);
+                            }}
+                        }}
+                    """)
+                    print(f"🤖 [Atende] Resultado captcha modal: {resultado_modal}")
+                    await page.wait_for_timeout(4000)
 
                     # Verifica se o captcha foi resolvido
                     if "sistema" in page.url:
-                        print(f"✅ [Atende] Redirecionado após captcha: {page.url}")
+                        print(f"✅ [Atende] Redirecionado após captcha modal!")
                         return True
-
-                    # Tenta ler token e chamar callback
-                    for frame in page.frames:
-                        if 'recaptcha' in frame.url and 'anchor' in frame.url:
-                            try:
-                                tk = await frame.evaluate(
-                                    "() => { const el = document.getElementById('recaptcha-token'); return el ? el.value : null; }"
-                                )
-                                if tk:
-                                    print(f"✅ [Atende] Token pós-clique: {tk[:30]}...")
-                                    # Dispara o botão Acessar novamente com token injetado
-                                    await page.evaluate(f"""
-                                        () => {{
-                                            let el = document.querySelector('[name="g-recaptcha-response"]');
-                                            if (!el) {{
-                                                el = document.createElement('textarea');
-                                                el.name = 'g-recaptcha-response';
-                                                el.style.display = 'none';
-                                                document.body.appendChild(el);
-                                            }}
-                                            el.value = '{tk}';
-                                        }}
-                                    """)
-                            except Exception:
-                                pass
-                            break
             except Exception as e:
                 print(f"⚠️  [Atende] Erro no captcha tentativa {tentativa+1}: {e}")
 
