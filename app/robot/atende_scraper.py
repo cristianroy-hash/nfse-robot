@@ -527,33 +527,57 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
         }}
     """)
 
-    # Passo 3: envia o login via fetch direto ao endpoint do WPO
-    # bypassa completamente o handler JS que verifica o reCAPTCHA
-    # O endpoint real é o mesmo que processa os dados do formulário
-    resultado = await page.evaluate(f"""
+    # CORREÇÃO v2.31: endpoint e função de login descobertos via DevTools:
+    #   POST atende.php?rot=63064&aca=101&ajax=t&processo=processaDados
+    #   Função JS: processaAcessoToken(token) → onClickAcessoFiscal()
+    #
+    # Estratégia: chama processaAcessoToken() diretamente com o token
+    # do reCAPTCHA, exatamente como o botão Acessar faria.
+
+    print("🔓 [Atende] Chamando processaAcessoToken diretamente...")
+
+    # Passo 1: verifica se a função existe e chama com o token
+    resultado_js = await page.evaluate(f"""
         async () => {{
+            const token = '{token_atual or ""}';
             try {{
+                // Método 1: chama processaAcessoToken diretamente
+                if (typeof processaAcessoToken === 'function') {{
+                    processaAcessoToken(token);
+                    return 'processaAcessoToken_ok';
+                }}
+
+                // Método 2: chama onClickAcessoFiscal
+                if (typeof onClickAcessoFiscal === 'function') {{
+                    onClickAcessoFiscal(token);
+                    return 'onClickAcessoFiscal_ok';
+                }}
+
+                // Método 3: fetch direto para o endpoint correto
+                const baseUrl = window.location.href.replace('/nfse', '');
+                const endpoint = baseUrl + 'atende.php?rot=63064&aca=101&ajax=t&processo=processaDados&ajaxPrevent=' + Date.now();
+
                 const usuario = document.querySelector('[name="login_usuario"]')?.value || '';
                 const senha = document.querySelector('[name="senha_usuario"]')?.value || '';
-                const token = '{token_atual or ""}';
-                const url = window.location.href;
 
-                // Monta os parâmetros exatamente como o WPO enviaria
-                const params = new URLSearchParams();
-                params.append('login_usuario', usuario);
-                params.append('senha_usuario', senha);
-                params.append('g-recaptcha-response', token);
-                params.append('chave', 'null');
-                params.append('caller', 'null');
-                params.append('parametro', '{{}}');
-                params.append('autoId', '1');
-                params.append('monitor', '0');
-                params.append('flush', '0');
-                params.append('versaoSistema', 'v2');
-                params.append('portalCidadao', 'true');
+                const params = new URLSearchParams({{
+                    'g-recaptcha-response': token,
+                    login_usuario: usuario,
+                    senha_usuario: senha,
+                    chave: 'null',
+                    caller: 'null',
+                    parametro: JSON.stringify({{
+                        nomeClasseEstilo: 'padrao',
+                        nomeClasseLayout: 'tabela'
+                    }}),
+                    autoId: '1',
+                    monitor: '0',
+                    flush: '0',
+                    versaoSistema: 'v2',
+                    portalCidadao: 'true'
+                }});
 
-                // Tenta fetch para o endpoint de login do WPO
-                const resp = await fetch(url, {{
+                const r = await fetch(endpoint, {{
                     method: 'POST',
                     headers: {{
                         'Content-Type': 'application/x-www-form-urlencoded',
@@ -562,24 +586,21 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
                     body: params.toString(),
                     credentials: 'include'
                 }});
-                const text = await resp.text();
-                return 'fetch_ok:' + resp.status + ':' + text.substring(0, 100);
+                const txt = await r.text();
+                return 'fetch_rot63064:' + r.status + ':' + txt.substring(0, 150);
             }} catch(e) {{
-                return 'fetch_erro: ' + String(e);
+                return 'erro: ' + String(e);
             }}
         }}
     """)
-    print(f"✅ [Atende] Submit v2.28: {resultado}")
+    print(f"✅ [Atende] Resultado v2.31: {resultado_js}")
+    await page.wait_for_timeout(3000)
 
-    # Também tenta o clique normal como fallback
+    # Tenta clique normal também como fallback
     await page.evaluate("""
         () => {
             const btn = document.querySelector("button[name='btn_entrar']");
-            if (btn) {
-                const clone = btn.cloneNode(true);
-                btn.parentNode.replaceChild(clone, btn);
-                clone.click();
-            }
+            if (btn) btn.click();
         }
     """)
     btn_clicado = True
