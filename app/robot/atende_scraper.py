@@ -495,6 +495,45 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
         if iframe_count > 0 and t == 0:  # só loga na primeira detecção
             print(f"🤖 [Atende] Captcha detectado — tentando resolver...")
 
+        if iframe_count > 0 and t == 0:
+            # DIAGNÓSTICO v2.18: captura HTML e URL do iframe do captcha
+            # para entender exatamente que tipo de captcha é este
+            try:
+                iframes_info = await page.evaluate("""
+                    () => {
+                        const frames = Array.from(document.querySelectorAll('iframe'));
+                        return frames.map(f => ({
+                            src: f.src,
+                            id: f.id,
+                            name: f.name,
+                            width: f.getAttribute('width'),
+                            height: f.getAttribute('height'),
+                            title: f.title
+                        }));
+                    }
+                """)
+                print(f"🖼️  [Atende] Iframes do captcha: {iframes_info}")
+
+                # Captura HTML de cada frame do Playwright
+                for i, frame in enumerate(page.frames):
+                    try:
+                        frame_html = await frame.evaluate(
+                            "() => document.body ? document.body.innerHTML.substring(0, 3000) : 'vazio'"
+                        )
+                        if frame_html and frame_html != 'vazio' and len(frame_html) > 50:
+                            print(f"   Frame {i} ({frame.url[:100]}):")
+                            print(f"   HTML: {frame_html[:500]}")
+                    except Exception as fe:
+                        pass
+
+                # HTML da página principal na tela do captcha
+                html_captcha = await page.evaluate(
+                    "() => document.body.innerHTML.substring(0, 5000)"
+                )
+                print(f"📄 [Atende] HTML tela captcha: {html_captcha}")
+            except Exception as e:
+                print(f"⚠️  [Atende] Diagnóstico captcha: {e}")
+
         if iframe_count > 0:
             try:
                 # CORREÇÃO v2.17: o grecaptcha está disponível (confirmado nos logs).
