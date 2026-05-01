@@ -619,7 +619,33 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
                     print(f"⚠️  [Atende] Captcha erro: {e}")
 
         # Verifica botão "Acessar" intermediário
-        # CORREÇÃO v2.21: injeta token ANTES de clicar no Acessar
+        # CORREÇÃO v2.22: diagnóstico — imprime HTML e todos os botões
+        # visíveis para identificar exatamente qual botão "Acessar" existe
+        if t == 0:
+            try:
+                url_agora = page.url
+                html_agora = await page.evaluate(
+                    "() => document.body.innerHTML.substring(0, 6000)"
+                )
+                print(f"📄 [Atende] URL pós-Entrar: {url_agora}")
+                print(f"📄 [Atende] HTML pós-Entrar: {html_agora}")
+
+                botoes = await page.evaluate("""
+                    () => Array.from(document.querySelectorAll('button, a, input[type=button], input[type=submit]'))
+                        .filter(el => el.offsetParent !== null)
+                        .map(el => ({
+                            tag: el.tagName,
+                            type: el.type || '',
+                            name: el.name || '',
+                            text: el.textContent.trim().substring(0, 50),
+                            class: el.className.substring(0, 60),
+                            href: el.href || ''
+                        }))
+                """)
+                print(f"🖱️  [Atende] Botões visíveis pós-Entrar: {botoes}")
+            except Exception as e:
+                print(f"⚠️  [Atende] Diagnóstico: {e}")
+
         btn_acessar = page.locator("button:has-text('Acessar'), a:has-text('Acessar')").first
         if await btn_acessar.count() > 0:
             print(f"🖱️  [Atende] Botão Acessar na tentativa {t+1} — injetando token e clicando...")
