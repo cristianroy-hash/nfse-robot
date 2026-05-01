@@ -498,8 +498,8 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
     # Isso CONFIRMA que o login foi bem-sucedido — não é captcha.
     # A URL pode não mudar (SPA), mas o DOM muda completamente.
     print("⏳ [Atende] Aguardando login ser processado...")
-    for t in range(15):
-        await page.wait_for_timeout(2000)
+    for t in range(20):
+        await page.wait_for_timeout(3000)
         url_atual = page.url
 
         # Verifica se URL mudou para sistema
@@ -507,22 +507,39 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
             print(f"✅ [Atende] Login ok via URL: {url_atual}")
             return True
 
-        # CORREÇÃO v2.23: verifica se a janela IPM apareceu no DOM
-        # Isso indica que o login foi aceito (tela de seleção de serviços)
+        # CORREÇÃO v2.24: verifica se a janela IPM apareceu no DOM.
+        # O HTML real mostrou id="janela_TIMESTAMP" e classes dinâmicas.
+        # Verificamos por múltiplos sinais: botão Acessar azul, logo IPM,
+        # ou presença de links de serviços fiscais.
         janela_ipm = await page.evaluate("""
             () => {
-                const janela = document.querySelector('.janela_ipm, .container-servico-fiscal, .janela_ipm_frame');
-                if (!janela) return null;
-                // Confirma que tem links de serviços fiscais
-                const links = Array.from(janela.querySelectorAll('a'))
-                    .filter(a => a.textContent.trim().length > 5)
-                    .map(a => a.textContent.trim().substring(0, 60));
-                return links.length > 0 ? links : null;
+                // Sinal 1: janela com id começando por "janela_"
+                const janelasId = Array.from(document.querySelectorAll('[id^="janela_"]'));
+                if (janelasId.length > 0) return 'janela_id_encontrada';
+
+                // Sinal 2: classe janela_ipm ou container-servico-fiscal
+                const janela = document.querySelector(
+                    '.janela_ipm, .container-servico-fiscal, .janela_ipm_frame, .bloco-acesso-servico-fiscal'
+                );
+                if (janela) return 'janela_classe_encontrada';
+
+                // Sinal 3: botão "Acessar" azul da IPM (não é o btn_entrar do login)
+                const btns = Array.from(document.querySelectorAll('button, input[type=button]'));
+                const btnAcessar = btns.find(b =>
+                    b.textContent.trim() === 'Acessar' && b.name !== 'btn_entrar'
+                );
+                if (btnAcessar) return 'botao_acessar_encontrado';
+
+                // Sinal 4: logo IPM fiscal
+                const logoIpm = document.querySelector('[class*="logo-ipm"], [alt*="ipm"], img[src*="ipm"]');
+                if (logoIpm) return 'logo_ipm_encontrado';
+
+                return null;
             }
         """)
 
         if janela_ipm:
-            print(f"✅ [Atende] Login ok — janela IPM detectada com links: {janela_ipm}")
+            print(f"✅ [Atende] Login ok — {janela_ipm}")
             return True
 
         # Diagnóstico na tentativa 3 para não poluir demais os logs
