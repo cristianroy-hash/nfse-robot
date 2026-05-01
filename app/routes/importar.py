@@ -499,10 +499,55 @@ async def baixar_lote_danfse_route(req: DownloadLoteRequest):
 #   Se o cliente tiver certificado A1 → usa /importar-notas (original).
 #   Se o cliente tiver credenciais de portal → usa esta rota.
 # =========================
+# =========================
+# HELPER: EXECUTA IMPORTAÇÃO MUNICIPAL EM BACKGROUND
+# Padrão assíncrono — evita timeout 503 do Railway.
+# O CapSolver pode levar 60-120s para resolver o captcha.
+# =========================
+async def _executar_importacao_municipal(job_id: str, req_dict: dict, jobs: dict):
+    try:
+        jobs[job_id]["status"] = "running"
+        jobs[job_id]["message"] = "Conectando ao portal municipal..."
+
+        resultado = await importar_via_atende(
+            portal_url=req_dict["portal_url"],
+            usuario=req_dict["portal_usuario"],
+            senha=req_dict["portal_senha"],
+            data_inicio=req_dict["data_inicio"],
+            data_fim=req_dict["data_fim"],
+        )
+
+        if isinstance(resultado, dict):
+            notas     = resultado.get("notas", [])
+            xml_bruto = resultado.get("xml_bruto")
+            municipio = resultado.get("municipio", "")
+        else:
+            notas     = resultado if isinstance(resultado, list) else []
+            xml_bruto = None
+            municipio = ""
+
+        jobs[job_id].update({
+            "status":            "concluido",
+            "message":           f"{len(notas)} nota(s) encontrada(s)",
+            "notas_encontradas": len(notas),
+            "notas":             notas,
+            "municipio":         municipio,
+            "xml_bruto":         xml_bruto,
+        })
+        print(f"✅ [v2] Job municipal {job_id} concluído: {len(notas)} nota(s)")
+
+    except Exception as e:
+        print(f"❌ [v2] Job municipal {job_id} falhou: {e}")
+        jobs[job_id].update({
+            "status":  "erro",
+            "message": str(e),
+        })
+
+
 @router.post("/importar-notas-municipal")
 async def importar_notas_municipal(req: ImportRequest):
 
-    # [NOVO v2] Valida se a URL é de um portal Atende.Net suportado
+    # [NOVO v2] Valida portal e credenciais
     if not is_portal_atende(req.portal_url):
         raise HTTPException(
             status_code=400,
@@ -511,61 +556,38 @@ async def importar_notas_municipal(req: ImportRequest):
                 f"Portais aceitos: nfse-saojose, nfse-palhoca, nfse-bigua (.atende.net)"
             )
         )
-
-    # [NOVO v2] Valida credenciais obrigatórias para portais municipais
     if not req.portal_usuario or not req.portal_senha:
         raise HTTPException(
             status_code=400,
-            detail="portal_usuario e portal_senha são obrigatórios para portais municipais Atende.Net"
+            detail="portal_usuario e portal_senha são obrigatórios"
         )
 
-    print(f"🏙️ [v2] Importação municipal iniciada")
+    # [NOVO v2] PADRÃO ASSÍNCRONO — igual ao /importar-notas do portal nacional.
+    # Retorna job_id imediatamente para evitar timeout 503 do Railway.
+    # O scraping + CapSolver rodam em background (~60-120s).
+    # Consulte GET /status/{job_id} para acompanhar o progresso.
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {
+        "job_id":            job_id,
+        "status":            "queued",
+        "cliente_id":        req.cliente_id,
+        "cnpj":              req.cnpj,
+        "portal":            req.portal_url,
+        "data_inicio":       req.data_inicio,
+        "data_fim":          req.data_fim,
+        "notas_encontradas": 0,
+        "notas":             [],
+        "message":           "Na fila",
+    }
+
+    print(f"🏙️ [v2] Job municipal criado: {job_id}")
     print(f"   Portal  : {req.portal_url}")
     print(f"   CNPJ    : {req.cnpj}")
     print(f"   Cliente : {req.cliente_id}")
     print(f"   Período : {req.data_inicio} → {req.data_fim}")
 
-    try:
-        # [NOVO v2] Chama o SOAP do Atende.Net (atende_scraper.py)
-        # Retorno pode ser dict (SOAP) ou list (legado) — normaliza aqui
-        resultado = await importar_via_atende(
-            portal_url=req.portal_url,
-            usuario=req.portal_usuario,
-            senha=req.portal_senha,
-            data_inicio=req.data_inicio,
-            data_fim=req.data_fim,
-        )
+    asyncio.create_task(
+        _executar_importacao_municipal(job_id, req.dict(), jobs)
+    )
 
-        if isinstance(resultado, dict):
-            notas    = resultado.get("notas", [])
-            xml_bruto = resultado.get("xml_bruto")
-            municipio = resultado.get("municipio", "")
-        else:
-            notas     = resultado if isinstance(resultado, list) else []
-            xml_bruto = None
-            municipio = ""
-
-        print(f"✅ [v2] Importação municipal concluída: {len(notas)} nota(s)")
-
-        return {
-            "status":           "concluido",
-            "cliente_id":       req.cliente_id,
-            "cnpj":             req.cnpj,
-            "portal":           req.portal_url,
-            "municipio":        municipio,
-            "data_inicio":      req.data_inicio,
-            "data_fim":         req.data_fim,
-            "notas_encontradas": len(notas),
-            "notas":            notas,
-            "xml_bruto":        xml_bruto,
-        }
-
-    except HTTPException:
-        raise  # repassa HTTPExceptions sem encapsular
-
-    except Exception as e:
-        print(f"❌ [v2] Erro na importação municipal: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Erro durante scraping do portal municipal: {str(e)}"
-        )
+    return {"job_id": job_id, "status": "queued"}
