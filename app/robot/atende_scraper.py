@@ -1,79 +1,180 @@
 # ============================================================
 # [NOVO v2] app/robot/atende_scraper.py
 #
-# Integração via WebService SOAP IPM para consulta de NFS-e.
-# Municípios suportados: São José/SC, Palhoça/SC, Biguaçu/SC
+# Scraper Playwright para portais municipais baseados no
+# sistema Atende.Net. Adicionado no robô v2 para suporte aos
+# municípios de São José/SC, Palhoça/SC e Biguaçu/SC.
 #
-# MUDANÇA DE ESTRATÉGIA (01/05/2026):
-#   Scraping com Playwright foi abandonado porque o portal Atende.Net
-#   usa reCAPTCHA invisible validado pelo Google no servidor — tokens
-#   gerados por browser headless são rejeitados pelo Google.
+# Fluxo real mapeado (29/04/2026):
+#   1. Acessa o portal municipal (portal_url)
+#   2. Preenche usuário (CPF/CNPJ) e senha
+#   3. Clica em Entrar
+#   4. Tela intermediária com botão "Acessar" → clica
+#   5. Tela de captcha "Não sou robô" → stealth passa automaticamente
+#   6. Redireciona para https://nfse-*.atende.net/?rot=1#!/sistema/66
+#   7. Fecha popup de aviso (se existir)
+#   8. Clica no card "Gerenciamento de Notas"
+#   9. Seleciona "Competência" no filtro e digita MM/YYYY
+#  10. Clica em "Consultar"
+#  11. Clica em "Download Todos" → seleciona "XML IPM"
+#  12. Aguarda download e retorna metadados do arquivo
 #
-# NOVA ABORDAGEM: WebService SOAP IPM oficial
-#   - Sem browser, sem captcha, sem Playwright
-#   - Autenticação via username/password no header SOAP
-#   - Endpoint: https://MUNICIPIO.atende.net/WsNFe2/LoteRps.jws
-#   - Método: ConsultarNfse com filtro de período e CNPJ
-#   - Pré-requisito: cliente deve ter WebService ativado no portal IPM
-#     (Manutenção → Emissão de NFS-e por WebService → Liberar Acesso)
+# CORREÇÃO v2.3 (30/04/2026) — erro de API do stealth:
+#   Mensagem: "object AsyncWrappingContextManager can't be used in 'await'"
+#   Causa: código usava `await Stealth().use_async(page)` que mistura
+#   a API v2.x (context manager com async with) com a v1.x (coroutine).
+#   Solução: usar `await stealth_async(page)` — API correta do pacote
+#   playwright-stealth v1.x (AtuboDad), aplicada direto na page depois
+#   de new_page() e antes do primeiro goto().
 #
-# Portais suportados:
-#   São José/SC  → https://nfse-saojose.atende.net
-#   Palhoça/SC   → https://nfse-palhoca.atende.net
-#   Biguaçu/SC   → https://nfse-bigua.atende.net
+#   APIs e quando usar cada uma:
+#     await stealth_async(page)                    ← v1.x ✅ USADA AQUI
+#     async with Stealth().use_async(playwright()) ← v2.x (exige refactor)
 #
-# Ponto de entrada: importar_via_atende()
-# Verificador:      is_portal_atende()
+# Dependência adicionada ao requirements.txt:
+#   playwright-stealth==1.0.6
 # ============================================================
 
+import os
+import asyncio
+import tempfile
 import httpx
-import xml.etree.ElementTree as ET
-from datetime import datetime, date
-import re
+from datetime import datetime
+from playwright.async_api import async_playwright, Page
+
+# ============================================================
+# CAPSOLVER — Resolução automática de reCAPTCHA v2
+# Lê a API key da variável de ambiente CAPSOLVER_API_KEY
+# definida no Railway. Se não estiver configurada, o captcha
+# será tratado sem serviço externo (pode falhar).
+# Documentação: https://docs.capsolver.com
+# ============================================================
+CAPSOLVER_API_KEY = os.environ.get("CAPSOLVER_API_KEY", "")
+if CAPSOLVER_API_KEY:
+    print(f"✅ [CapSolver] API key configurada")
+else:
+    print("⚠️  [CapSolver] CAPSOLVER_API_KEY não configurada — captcha pode falhar")
+
+
+async def _resolver_captcha_capsolver(sitekey: str, page_url: str) -> str | None:
+    """
+    Resolve reCAPTCHA v2 via CapSolver API.
+    Retorna o token resolvido ou None em caso de falha.
+
+    Sitekey confirmado: 6LdPM3ksAAAAAJuwC8jAVFyDghcb8Aj804E9SFQp
+    Endpoint: rot=63064&aca=101 do Atende.Net
+
+    Fluxo:
+      1. Cria tarefa no CapSolver (createTask)
+      2. Aguarda resolução com polling (getTaskResult)
+      3. Retorna gRecaptchaResponse quando status = ready
+    """
+    if not CAPSOLVER_API_KEY:
+        print("❌ [CapSolver] API key não configurada")
+        return None
+
+    print(f"🤖 [CapSolver] Enviando reCAPTCHA v2 para resolução...")
+    print(f"   Sitekey: {sitekey}")
+    print(f"   URL    : {page_url}")
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            # Passo 1: cria a tarefa
+            payload_criar = {
+                "clientKey": CAPSOLVER_API_KEY,
+                "task": {
+                    "type": "ReCaptchaV2Task",
+                    "websiteURL": page_url,
+                    "websiteKey": sitekey,
+                }
+            }
+            resp_criar = await client.post(
+                "https://api.capsolver.com/createTask",
+                json=payload_criar
+            )
+            dados_criar = resp_criar.json()
+            print(f"   createTask: {dados_criar}")
+
+            if dados_criar.get("errorId", 1) != 0:
+                print(f"❌ [CapSolver] Erro ao criar tarefa: {dados_criar.get('errorDescription')}")
+                return None
+
+            task_id = dados_criar.get("taskId")
+            if not task_id:
+                print("❌ [CapSolver] taskId não retornado")
+                return None
+
+            print(f"✅ [CapSolver] Tarefa criada: {task_id}")
+
+            # Passo 2: polling até resolver (máx 120s)
+            for tentativa in range(24):  # 24 x 5s = 120s
+                await asyncio.sleep(5)
+
+                payload_resultado = {
+                    "clientKey": CAPSOLVER_API_KEY,
+                    "taskId": task_id,
+                }
+                resp_resultado = await client.post(
+                    "https://api.capsolver.com/getTaskResult",
+                    json=payload_resultado
+                )
+                dados_resultado = resp_resultado.json()
+                status = dados_resultado.get("status")
+
+                print(f"   Polling {tentativa+1}/24: {status}")
+
+                if status == "ready":
+                    token = dados_resultado.get("solution", {}).get("gRecaptchaResponse")
+                    if token:
+                        print(f"✅ [CapSolver] Token resolvido: {token[:40]}...")
+                        return token
+                    else:
+                        print("❌ [CapSolver] Token não encontrado na resposta")
+                        return None
+
+                if status == "failed":
+                    print(f"❌ [CapSolver] Tarefa falhou: {dados_resultado}")
+                    return None
+
+            print("❌ [CapSolver] Timeout — captcha não resolvido em 120s")
+            return None
+
+    except Exception as e:
+        print(f"❌ [CapSolver] Erro inesperado: {e}")
+        return None
+
+# ============================================================
+# STEALTH — API CORRETA v1.x (playwright-stealth AtuboDad)
+# Uso: await stealth_async(page)
+# Aplicado depois de new_page() e ANTES do primeiro goto().
+# Fallback seguro: se não instalado o robô continua funcionando
+# (mas o captcha pode bloquear sem o stealth).
+# ============================================================
+try:
+    from playwright_stealth import stealth_async
+    STEALTH_DISPONIVEL = True
+    print("✅ [Atende] playwright-stealth carregado (stealth_async v1.x)")
+except ImportError:
+    STEALTH_DISPONIVEL = False
+    print("⚠️  [Atende] playwright-stealth não instalado — captcha pode bloquear")
 
 
 # ============================================================
-# MAPEAMENTO DE PORTAIS → ENDPOINTS SOAP
-# Chave  = fragmento do hostname (usado em portal_url)
-# Valor  = configuração do endpoint WebService IPM
+# MAPEAMENTO DE PORTAIS ATENDE.NET SUPORTADOS
+# Para adicionar novos municípios: inclua uma nova entrada aqui.
 # ============================================================
 PORTAIS_ATENDE = {
-    "nfse-saojose.atende.net": {
-        "nome":     "São José/SC",
-        "base_url": "https://nfse-saojose.atende.net",
-        # Endpoints IPM/Atende.Net — testados em ordem de prioridade
-        "ws_urls": [
-            "https://nfse-saojose.atende.net/WsNFe2/LoteRps.jws",
-            "https://nfse-saojose.atende.net/nfse/services/NFSeServices",
-            "https://nfse-saojose.atende.net/nfse/services/NFSeConsultas",
-            "https://nfse-saojose.atende.net/WsNfe/NfseServices",
-        ],
-    },
-    "nfse-palhoca.atende.net": {
-        "nome":     "Palhoça/SC",
-        "base_url": "https://nfse-palhoca.atende.net",
-        "ws_urls": [
-            "https://nfse-palhoca.atende.net/WsNFe2/LoteRps.jws",
-            "https://nfse-palhoca.atende.net/nfse/services/NFSeServices",
-            "https://nfse-palhoca.atende.net/nfse/services/NFSeConsultas",
-            "https://nfse-palhoca.atende.net/WsNfe/NfseServices",
-        ],
-    },
-    "nfse-bigua.atende.net": {
-        "nome":     "Biguaçu/SC",
-        "base_url": "https://nfse-bigua.atende.net",
-        "ws_urls": [
-            "https://nfse-bigua.atende.net/WsNFe2/LoteRps.jws",
-            "https://nfse-bigua.atende.net/nfse/services/NFSeServices",
-            "https://nfse-bigua.atende.net/nfse/services/NFSeConsultas",
-            "https://nfse-bigua.atende.net/WsNfe/NfseServices",
-        ],
-    },
+    "nfse-saojose.atende.net": "São José/SC",
+    "nfse-palhoca.atende.net": "Palhoça/SC",
+    "nfse-bigua.atende.net":   "Biguaçu/SC",
 }
 
 
 # ============================================================
 # VERIFICADOR: IS_PORTAL_ATENDE
+# Retorna True se a URL pertence a um portal Atende.Net suportado.
+# Chamado em importar.py para validar portal_url antes de chamar
+# importar_via_atende().
 # ============================================================
 def is_portal_atende(portal_url: str) -> bool:
     if not portal_url:
@@ -81,239 +182,1096 @@ def is_portal_atende(portal_url: str) -> bool:
     return any(host in portal_url for host in PORTAIS_ATENDE)
 
 
-def _get_portal_config(portal_url: str) -> dict | None:
-    for host, config in PORTAIS_ATENDE.items():
-        if host in portal_url:
-            return config
-    return None
-
-
 # ============================================================
-# HELPER: NORMALIZA DATA
-# Aceita DD/MM/YYYY ou YYYY-MM-DD e retorna YYYY-MM-DD
+# HELPER: SCREENSHOT DE DEBUG
+# Salva screenshot em /tmp — visível nos logs do Railway.
+# Útil para identificar em qual etapa o scraper travou.
 # ============================================================
-def _normalizar_data(d: str) -> str:
-    if "/" in d and len(d) == 10:
-        partes = d.split("/")
-        return f"{partes[2]}-{partes[1]}-{partes[0]}"
-    return d
-
-
-# ============================================================
-# HELPER: LIMPA CNPJ (remove pontos, barras, traços)
-# ============================================================
-def _limpar_cnpj(cnpj: str) -> str:
-    return re.sub(r"[^0-9]", "", cnpj)
-
-
-# ============================================================
-# MONTA ENVELOPE SOAP: ConsultarNfse
-# Autentica via header SOAP com username e password.
-# Filtra por CNPJ do prestador e período de competência.
-# ============================================================
-def _montar_soap_consultar_nfse(
-    cnpj: str,
-    usuario: str,
-    senha: str,
-    data_inicio: str,
-    data_fim: str,
-) -> str:
-    cnpj_limpo = _limpar_cnpj(cnpj)
-    di = _normalizar_data(data_inicio)
-    df = _normalizar_data(data_fim)
-
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope
-    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-    xmlns:nfse="http://nfse.abrasf.org.br/">
-  <soapenv:Header>
-    <nfse:cabecalho>
-      <versaoDados>1.00</versaoDados>
-    </nfse:cabecalho>
-    <wsse:Security
-        xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
-      <wsse:UsernameToken>
-        <wsse:Username>{usuario}</wsse:Username>
-        <wsse:Password>{senha}</wsse:Password>
-      </wsse:UsernameToken>
-    </wsse:Security>
-  </soapenv:Header>
-  <soapenv:Body>
-    <nfse:ConsultarNfseServicoPrestadoEnvio>
-      <Prestador>
-        <Cnpj>{cnpj_limpo}</Cnpj>
-      </Prestador>
-      <PeriodoEmissao>
-        <DataInicial>{di}</DataInicial>
-        <DataFinal>{df}</DataFinal>
-      </PeriodoEmissao>
-    </nfse:ConsultarNfseServicoPrestadoEnvio>
-  </soapenv:Body>
-</soapenv:Envelope>"""
-
-
-# ============================================================
-# MONTA ENVELOPE SOAP: ConsultarNfse (formato alternativo IPM)
-# Alguns municípios IPM usam formato ligeiramente diferente
-# ============================================================
-def _montar_soap_ipm(
-    cnpj: str,
-    usuario: str,
-    senha: str,
-    data_inicio: str,
-    data_fim: str,
-) -> str:
-    cnpj_limpo = _limpar_cnpj(cnpj)
-    di = _normalizar_data(data_inicio)
-    df = _normalizar_data(data_fim)
-
-    xml_consulta = f"""<ConsultarNfseServicoPrestadoEnvio xmlns="http://www.abrasf.org.br/nfse.xsd">
-  <Prestador>
-    <CpfCnpj>
-      <Cnpj>{cnpj_limpo}</Cnpj>
-    </CpfCnpj>
-  </Prestador>
-  <PeriodoEmissao>
-    <DataInicial>{di}</DataInicial>
-    <DataFinal>{df}</DataFinal>
-  </PeriodoEmissao>
-</ConsultarNfseServicoPrestadoEnvio>"""
-
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope
-    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-    xmlns:ws="http://ws.issweb.fiorilli.com.br/">
-  <soapenv:Header>
-    <wsse:Security
-        xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
-      <wsse:UsernameToken>
-        <wsse:Username>{usuario}</wsse:Username>
-        <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText">{senha}</wsse:Password>
-      </wsse:UsernameToken>
-    </wsse:Security>
-  </soapenv:Header>
-  <soapenv:Body>
-    <ws:consultarNfseServicoPrestado>
-      <xml>{xml_consulta}</xml>
-      <username>{usuario}</username>
-      <password>{senha}</password>
-    </ws:consultarNfseServicoPrestado>
-  </soapenv:Body>
-</soapenv:Envelope>"""
-
-
-# ============================================================
-# PARSEIA RESPOSTA XML: extrai lista de notas
-# ============================================================
-def _parsear_notas_xml(xml_resposta: str) -> list:
-    notas = []
+async def _screenshot_debug(page: Page, nome: str):
     try:
-        # Remove namespaces para facilitar parsing
-        xml_limpo = re.sub(r' xmlns[^"]*"[^"]*"', '', xml_resposta)
-        xml_limpo = re.sub(r'<[a-zA-Z]+:', '<', xml_limpo)
-        xml_limpo = re.sub(r'</[a-zA-Z]+:', '</', xml_limpo)
-
-        root = ET.fromstring(xml_limpo)
-
-        # Busca todos os elementos CompNfse (nota completa)
-        comp_nfses = root.findall('.//CompNfse') or root.findall('.//Nfse')
-
-        for comp in comp_nfses:
-            try:
-                nota = {}
-
-                # Número da nota
-                num_el = comp.find('.//Numero') or comp.find('.//NumeroNfse')
-                nota['numero_nota'] = num_el.text if num_el is not None else ''
-
-                # Data de emissão
-                data_el = comp.find('.//DataEmissao') or comp.find('.//DataCompetencia')
-                nota['data_emissao'] = data_el.text if data_el is not None else ''
-
-                # Valor do serviço
-                valor_el = comp.find('.//ValorServicos') or comp.find('.//ValorLiquidoNfse')
-                nota['valor_servico'] = valor_el.text if valor_el is not None else ''
-
-                # Tomador
-                tom_nome = comp.find('.//RazaoSocial') or comp.find('.//NomeTomador')
-                nota['tomador'] = tom_nome.text if tom_nome is not None else ''
-
-                # CNPJ tomador
-                tom_cnpj = comp.find('.//Cnpj') or comp.find('.//CpfCnpj/Cnpj')
-                nota['cnpj_tomador'] = tom_cnpj.text if tom_cnpj is not None else ''
-
-                # Chave de acesso / código verificação
-                chave_el = comp.find('.//CodigoVerificacao') or comp.find('.//ChaveAcesso')
-                nota['chave_acesso'] = chave_el.text if chave_el is not None else nota['numero_nota']
-
-                # Situação
-                sit_el = comp.find('.//Situacao') or comp.find('.//Status')
-                nota['situacao'] = sit_el.text if sit_el is not None else 'N'
-
-                nota['origem'] = 'atende_net_soap'
-                nota['url_download'] = None
-                nota['url_danfse'] = None
-
-                notas.append(nota)
-            except Exception as e:
-                print(f"⚠️  [Atende SOAP] Erro ao parsear nota: {e}")
-                continue
-
-        print(f"✅ [Atende SOAP] {len(notas)} nota(s) parseada(s) do XML")
-
-    except ET.ParseError as e:
-        print(f"❌ [Atende SOAP] Erro ao parsear XML: {e}")
-        print(f"   XML recebido: {xml_resposta[:500]}")
-
-    return notas
-
-
-# ============================================================
-# CHAMA O WEBSERVICE SOAP
-# Tenta múltiplos formatos de envelope SOAP pois o IPM
-# pode variar levemente entre municípios.
-# ============================================================
-async def _chamar_webservice(
-    ws_url: str,
-    soap_body: str,
-    soap_action: str = "",
-    timeout: int = 60,
-) -> str | None:
-    headers = {
-        "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": soap_action,
-    }
-
-    try:
-        async with httpx.AsyncClient(
-            timeout=timeout,
-            verify=False,  # alguns portais municipais têm cert auto-assinado
-            follow_redirects=True,
-        ) as client:
-            print(f"📤 [Atende SOAP] POST → {ws_url}")
-            resp = await client.post(ws_url, content=soap_body.encode("utf-8"), headers=headers)
-            print(f"📥 [Atende SOAP] Status: {resp.status_code}")
-
-            if resp.status_code == 200:
-                return resp.text
-            else:
-                print(f"❌ [Atende SOAP] Erro HTTP {resp.status_code}: {resp.text[:300]}")
-                return None
-
-    except httpx.ConnectError as e:
-        print(f"❌ [Atende SOAP] Conexão falhou: {e}")
-        return None
-    except httpx.TimeoutException:
-        print(f"❌ [Atende SOAP] Timeout após {timeout}s")
-        return None
+        caminho = f"/tmp/atende_debug_{nome}_{datetime.now().strftime('%H%M%S')}.png"
+        await page.screenshot(path=caminho, full_page=True)
+        print(f"📸 [Atende] Screenshot: {caminho}")
     except Exception as e:
-        print(f"❌ [Atende SOAP] Erro inesperado: {e}")
+        print(f"⚠️  [Atende] Screenshot falhou ({nome}): {e}")
+
+
+# ============================================================
+# CRIAR BROWSER COM STEALTH
+# Cria o browser e aplica stealth_async na page.
+# IMPORTANTE: stealth_async(page) deve ser chamado DEPOIS de
+# new_page() e ANTES do primeiro goto().
+# ============================================================
+async def criar_browser_atende():
+    p = await async_playwright().start()
+
+    browser = await p.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+            # CORREÇÃO v2.12: simula Chrome moderno para passar verificação de versão
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        ]
+    )
+
+    context = await browser.new_context(
+        viewport={"width": 1366, "height": 768},
+        ignore_https_errors=True,
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        locale="pt-BR",
+        timezone_id="America/Sao_Paulo",
+        accept_downloads=True,
+        java_script_enabled=True,
+        bypass_csp=True,
+        # CORREÇÃO v2.13: sobrescreve headers que delatam o Playwright.
+        # O Playwright envia sec-ch-ua="HeadlessChrome" que o Atende.Net
+        # detecta e usa para bloquear o formulário de login (mensagemNavegador).
+        # Sobrescrevemos com headers idênticos aos de um Chrome 131 real.
+        extra_http_headers={
+            "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "accept-language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        },
+    )
+
+    # CORREÇÃO v2.11: concede permissões de pop-up para o portal
+    # Isso simula o usuário que desabilitou o bloqueador de pop-ups
+    try:
+        await context.grant_permissions(
+            ["notifications"],
+            origin="https://nfse-saojose.atende.net"
+        )
+        print("✅ [Atende] Permissões de pop-up concedidas")
+    except Exception as e:
+        print(f"⚠️  [Atende] Permissões: {e}")
+
+
+    page = await context.new_page()
+    page.set_default_timeout(60000)
+
+    # CORREÇÃO v2.29: intercepta TODOS os requests para descobrir
+    # o endpoint exato que o WPO usa para processar o login
+    async def handle_request(request):
+        url = request.url
+        method = request.method
+        if method == 'POST':
+            try:
+                post_data = request.post_data or ''
+                log_data = post_data[:400]
+                # Mascara senhas
+                for senha in ['Cad1234@', 'Clinica12@']:
+                    log_data = log_data.replace(senha, '****')
+                print(f"📤 [Atende] {method}: {url} | {log_data[:200]}")
+            except Exception as e:
+                print(f"📤 [Atende] {method}: {url} | erro: {e}")
+        elif 'atende.net' in url and method == 'GET' and any(
+            k in url for k in ['login', 'autent', 'acesso', 'security', 'session']
+        ):
+            print(f"📤 [Atende] GET relevante: {url}")
+
+    async def handle_response(response):
+        url = response.url
+        if response.request.method == 'POST':
+            try:
+                status = response.status
+                body = await response.text()
+                print(f"📥 [Atende] RESP POST ({status}): {url[-80:]}")
+                print(f"   Body: {body[:300]}")
+            except Exception:
+                pass
+        if 'recaptcha' in url and 'userverify' in url:
+            try:
+                body = await response.text()
+                print(f"🤖 [Atende] reCAPTCHA verify ({response.status}): {body[:300]}")
+            except Exception:
+                pass
+
+    page.on("request", handle_request)
+    page.on("response", handle_response)
+
+    # CORREÇÃO v2.16: stealth NÃO aplicado aqui.
+    # Aplicar stealth antes do goto() impede o jQuery/WPO de carregar
+    # pois o stealth modifica objetos JS globais que o WPO depende.
+    # O stealth será aplicado via page.add_init_script SELETIVAMENTE
+    # apenas para o iframe do reCAPTCHA, não para a página principal.
+    print("ℹ️   [Atende] stealth adiado — será aplicado seletivamente no captcha")
+
+    print("🌐 [Atende] Browser pronto")
+    return p, browser, context, page
+
+
+# ============================================================
+# FECHAR BROWSER — sempre no bloco finally
+# ============================================================
+async def fechar_browser_atende(p, browser):
+    try:
+        await browser.close()
+        await p.stop()
+        print("🔒 [Atende] Browser fechado")
+    except Exception as e:
+        print(f"⚠️  [Atende] Erro ao fechar browser: {e}")
+
+
+# ============================================================
+# PASSO 1-3: LOGIN
+# Preenche usuário/senha e clica em Entrar.
+# keyboard.type com delay=80ms dispara eventos individuais que
+# o web component do Atende.Net precisa para habilitar o botão.
+# ============================================================
+async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) -> bool:
+    # CORREÇÃO v2.10: análise completa do HTML revelou que o Atende.Net usa
+    # o framework WPO (plugin jQuery) para montar os inputs dentro de spans
+    # vazios (.campo_login_desativo, .campo_senha_desativo).
+    # O jQuery e o plugin WPO precisam inicializar completamente antes que
+    # qualquer interação seja possível.
+    #
+    # Fluxo correto identificado:
+    #   1. Página carrega com spans vazios (campo_login_desativo, etc.)
+    #   2. jQuery + WPO inicializam e preenchem os spans com inputs reais
+    #   3. O formulário fica dentro do viewport após a inicialização
+    #   4. Usuário interage com os inputs
+    #
+    # Solução: aguardar jQuery disponível, depois aguardar o plugin WPO
+    # inicializar os campos, depois scrollar para o formulário.
+
+    print(f"🌐 [Atende] Acessando: {portal_url}")
+
+    # Usa networkidle para aguardar jQuery + WPO carregar completamente
+    # CORREÇÃO v2.11: adiciona init_script para interceptar o carregamento
+    # e garantir que o contexto de pop-ups esteja liberado antes do jQuery
+    await page.add_init_script("""
+        // Sobrescreve window.open para não ser bloqueado
+        window._originalOpen = window.open;
+        window.open = function(...args) {
+            try { return window._originalOpen(...args); } catch(e) { return null; }
+        };
+        // Remove detecção de popup blocker que impede WPO de inicializar
+        Object.defineProperty(window, 'popupBlocked', { value: false, writable: true });
+    """)
+
+    await page.goto(portal_url, wait_until="networkidle", timeout=120000)
+    await page.wait_for_timeout(5000)  # aguarda WPO inicializar completamente
+
+
+    # PASSO 1: fecha popup via CSS puro (sem jQuery — ainda pode não estar pronto)
+    print("🧹 [Atende] Fechando popup de manutenção...")
+    await page.evaluate("""
+        () => {
+            const aviso = document.getElementById('aviso_manutencao');
+            if (aviso) {
+                aviso.style.cssText = 'display:none!important;visibility:hidden!important;opacity:0!important;z-index:-9999!important;pointer-events:none!important;';
+            }
+        }
+    """)
+    await page.wait_for_timeout(1000)
+    await _screenshot_debug(page, "01_pos_popup")
+
+    # PASSO 2: aguarda jQuery disponível e força inicialização do WPO
+    print("⏳ [Atende] Aguardando jQuery + WPO inicializar...")
+    jquery_ok = False
+    for t in range(10):
+        await page.wait_for_timeout(2000)
+        try:
+            resultado = await page.evaluate("""
+                () => {
+                    // Verifica se jQuery está disponível
+                    if (typeof $ === 'undefined' && typeof jQuery === 'undefined') {
+                        return {jquery: false, wpo: false};
+                    }
+                    const jq = typeof $ !== 'undefined' ? $ : jQuery;
+
+                    // Verifica se os spans foram preenchidos pelo WPO
+                    const campoLogin = jq('.campo_login_desativo');
+                    const inputs = campoLogin.find('input').length + 
+                                   jq('.campo_senha_desativo').find('input').length;
+
+                    // Tenta forçar o plugin WPO a inicializar se ainda não fez
+                    if (inputs === 0 && typeof jq.fn.wpoLogin !== 'undefined') {
+                        try { jq('.login').wpoLogin(); } catch(e) {}
+                    }
+
+                    return {
+                        jquery: true,
+                        inputs_dentro_spans: inputs,
+                        campo_login_html: jq('.campo_login_desativo').html(),
+                        campo_senha_html: jq('.campo_senha_desativo').html()
+                    };
+                }
+            """)
+            print(f"   Tentativa {t+1}: {resultado}")
+            if resultado.get('jquery') and resultado.get('inputs_dentro_spans', 0) > 0:
+                print("✅ [Atende] jQuery + WPO inicializados, inputs encontrados!")
+                jquery_ok = True
+                break
+        except Exception as e:
+            print(f"   Tentativa {t+1}: erro — {e}")
+
+    await _screenshot_debug(page, "02_pos_jquery")
+
+    # PASSO 3: scroll para o formulário e busca os inputs
+    print("📜 [Atende] Scrollando para o formulário...")
+    await page.evaluate("""
+        () => {
+            const login = document.querySelector('.login');
+            if (login) login.scrollIntoView({behavior: 'smooth', block: 'center'});
+        }
+    """)
+    await page.wait_for_timeout(1000)
+
+    # PASSO 4: busca os inputs com seletores dentro dos spans WPO
+    print("🔍 [Atende] Buscando inputs nos spans WPO...")
+    inputs_encontrados = False
+    info_inputs = []
+
+    for tentativa in range(10):
+        await page.wait_for_timeout(2000)
+
+        info_inputs = await page.evaluate("""
+            () => {
+                const inputs = Array.from(document.querySelectorAll('input'));
+                return inputs.map((inp, i) => ({
+                    index: i,
+                    type: inp.type || 'text',
+                    name: inp.name || '',
+                    id: inp.id || '',
+                    placeholder: inp.placeholder || '',
+                    class: inp.className || '',
+                    visible: inp.offsetParent !== null && 
+                             getComputedStyle(inp).display !== 'none' &&
+                             getComputedStyle(inp).visibility !== 'hidden'
+                }));
+            }
+        """)
+
+        inputs_visiveis = [x for x in info_inputs if x['visible']]
+        print(f"🔍 [Atende] Tentativa {tentativa+1}/10 — visíveis: {len(inputs_visiveis)} | DOM: {len(info_inputs)}")
+
+        if info_inputs:  # qualquer input no DOM já é suficiente para tentar
+            print(f"📋 [Atende] Inputs: {info_inputs}")
+            inputs_encontrados = True
+            break
+
+    if not inputs_encontrados:
+        html_completo = await page.evaluate("""
+            () => document.body.innerHTML.substring(0, 10000)
+        """)
+        print(f"📄 [Atende] HTML (10000): {html_completo}")
+        frames = page.frames
+        print(f"🖼️  [Atende] Frames: {len(frames)}")
+        for i, frame in enumerate(frames):
+            try:
+                fi = await frame.evaluate("""
+                    () => Array.from(document.querySelectorAll('input'))
+                              .map(inp => ({type:inp.type, name:inp.name, id:inp.id,
+                                           visible: inp.offsetParent !== null}))
+                """)
+                print(f"   Frame {i} ({frame.url[:100]}): {fi}")
+            except Exception as fe:
+                print(f"   Frame {i}: erro — {fe}")
+
+        print("❌ [Atende] Formulário não encontrado após todas as tentativas")
+        await _screenshot_debug(page, "03_sem_formulario_final")
+        return False
+
+    await _screenshot_debug(page, "03_formulario_encontrado")
+
+
+
+    # Seletores do mais específico ao mais genérico
+    seletores_usuario = [
+        "input[name='login']",
+        "input[id='login']",
+        "input[name='usuario']",
+        "input[id='usuario']",
+        "input[autocomplete='username']",
+        "input[placeholder*='usu']",
+        "input[placeholder*='CPF']",
+        "input[placeholder*='ogin']",
+        # Fallback: primeiro input de texto visível (não é password nem hidden)
+        "input:not([type='password']):not([type='hidden']):not([type='checkbox'])",
+    ]
+
+    campo_usuario = None
+    for sel in seletores_usuario:
+        try:
+            elem = page.locator(sel).first
+            if await elem.count() > 0 and await elem.is_visible():
+                print(f"✅ [Atende] Campo usuário: {sel}")
+                campo_usuario = elem
+                break
+        except Exception as e:
+            print(f"⚠️  [Atende] Seletor falhou ({sel}): {e}")
+
+    if not campo_usuario:
+        print("❌ [Atende] Campo usuário não encontrado")
+        await _screenshot_debug(page, "02_erro_usuario")
+        return False
+
+    await campo_usuario.scroll_into_view_if_needed()
+    await campo_usuario.click()
+    await page.keyboard.type(usuario, delay=80)
+    await campo_usuario.dispatch_event("input")
+    await campo_usuario.dispatch_event("change")
+    print("✏️  [Atende] Usuário digitado")
+    await page.wait_for_timeout(1200)
+
+    # type=password é confiável em qualquer framework JS
+    seletores_senha = [
+        "input[type='password']",
+        "input[name='senha']",
+        "input[id='senha']",
+        "input[autocomplete='current-password']",
+    ]
+    campo_senha = None
+    for sel in seletores_senha:
+        try:
+            elem = page.locator(sel).first
+            if await elem.count() > 0 and await elem.is_visible():
+                print(f"✅ [Atende] Campo senha: {sel}")
+                campo_senha = elem
+                break
+        except Exception:
+            pass
+
+    if not campo_senha:
+        print("❌ [Atende] Campo senha não encontrado")
+        await _screenshot_debug(page, "03_erro_senha")
+        return False
+
+    await campo_senha.scroll_into_view_if_needed()
+    await campo_senha.click()
+    await page.keyboard.type(senha, delay=80)
+    await campo_senha.dispatch_event("input")
+    await campo_senha.dispatch_event("change")
+    print("✏️  [Atende] Senha digitada")
+    await page.wait_for_timeout(1500)
+    await _screenshot_debug(page, "04_campos_preenchidos")
+
+    # Remove CSS que oculta o botão antes de clicar
+    await page.evaluate("""
+        () => {
+            const btn = document.querySelector("button[name='btn_entrar']");
+            if (btn) {
+                btn.style.display    = 'block';
+                btn.style.visibility = 'visible';
+                btn.style.opacity    = '1';
+                btn.removeAttribute('disabled');
+            }
+        }
+    """)
+    await page.wait_for_timeout(500)
+
+    # CORREÇÃO v2.28: o reCAPTCHA invisible bloqueia o submit localmente.
+    # O log confirmou: após clicar btn_entrar, NENHUM POST é enviado ao servidor.
+    # O JS do WPO verifica o token localmente e cancela o submit se inválido.
+    #
+    # Solução: antes de clicar, sobrescrever grecaptcha.execute e injetar
+    # o token no campo g-recaptcha-response, depois remover os event listeners
+    # do botão (cloneNode) para bypasear a validação JS local.
+
+    print("🔓 [Atende] Preparando bypass do reCAPTCHA local...")
+
+    # Passo 1: lê token atual do frame reCAPTCHA
+    token_atual = None
+    for frame in page.frames:
+        if 'recaptcha' in frame.url and 'anchor' in frame.url:
+            try:
+                token_atual = await frame.evaluate(
+                    "() => { const el = document.getElementById('recaptcha-token'); return el ? el.value : null; }"
+                )
+                if token_atual:
+                    print(f"✅ [Atende] Token reCAPTCHA: {token_atual[:30]}...")
+            except Exception:
+                pass
+            break
+
+    # Passo 2: injeta token e sobrescreve validação JS
+    await page.evaluate(f"""
+        () => {{
+            // Injeta token no campo g-recaptcha-response
+            let tokenField = document.querySelector('[name="g-recaptcha-response"]');
+            if (!tokenField) {{
+                tokenField = document.createElement('textarea');
+                tokenField.name = 'g-recaptcha-response';
+                tokenField.style.display = 'none';
+                document.body.appendChild(tokenField);
+            }}
+            tokenField.value = '{token_atual or "03bypass"}';
+
+            // Sobrescreve grecaptcha.execute para disparar callback imediatamente
+            if (typeof grecaptcha !== 'undefined') {{
+                const origExec = grecaptcha.execute;
+                grecaptcha.execute = function(...args) {{
+                    try {{
+                        const cfg = window.___grecaptcha_cfg;
+                        if (cfg && cfg.clients) {{
+                            for (const client of Object.values(cfg.clients)) {{
+                                for (const key of Object.keys(client)) {{
+                                    if (client[key] && typeof client[key].callback === 'function') {{
+                                        client[key].callback(tokenField.value);
+                                        return;
+                                    }}
+                                }}
+                            }}
+                        }}
+                    }} catch(e) {{}}
+                    if (origExec) origExec.apply(this, args);
+                }};
+            }}
+        }}
+    """)
+
+    # CORREÇÃO v2.31: endpoint e função de login descobertos via DevTools:
+    #   POST atende.php?rot=63064&aca=101&ajax=t&processo=processaDados
+    #   Função JS: processaAcessoToken(token) → onClickAcessoFiscal()
+    #
+    # Estratégia: chama processaAcessoToken() diretamente com o token
+    # do reCAPTCHA, exatamente como o botão Acessar faria.
+
+    print("🔓 [Atende] Chamando processaAcessoToken diretamente...")
+
+    # Passo 1: verifica se a função existe e chama com o token
+    resultado_js = await page.evaluate(f"""
+        async () => {{
+            const token = '{token_atual or ""}';
+            try {{
+                // Método 1: chama processaAcessoToken diretamente
+                if (typeof processaAcessoToken === 'function') {{
+                    processaAcessoToken(token);
+                    return 'processaAcessoToken_ok';
+                }}
+
+                // Método 2: chama onClickAcessoFiscal
+                if (typeof onClickAcessoFiscal === 'function') {{
+                    onClickAcessoFiscal(token);
+                    return 'onClickAcessoFiscal_ok';
+                }}
+
+                // Método 3: fetch direto para o endpoint correto
+                const baseUrl = window.location.href.replace('/nfse', '');
+                const endpoint = baseUrl + 'atende.php?rot=63064&aca=101&ajax=t&processo=processaDados&ajaxPrevent=' + Date.now();
+
+                const usuario = document.querySelector('[name="login_usuario"]')?.value || '';
+                const senha = document.querySelector('[name="senha_usuario"]')?.value || '';
+
+                const params = new URLSearchParams({{
+                    'g-recaptcha-response': token,
+                    login_usuario: usuario,
+                    senha_usuario: senha,
+                    chave: 'null',
+                    caller: 'null',
+                    parametro: JSON.stringify({{
+                        nomeClasseEstilo: 'padrao',
+                        nomeClasseLayout: 'tabela'
+                    }}),
+                    autoId: '1',
+                    monitor: '0',
+                    flush: '0',
+                    versaoSistema: 'v2',
+                    portalCidadao: 'true'
+                }});
+
+                const r = await fetch(endpoint, {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }},
+                    body: params.toString(),
+                    credentials: 'include'
+                }});
+                const txt = await r.text();
+                return 'fetch_rot63064:' + r.status + ':' + txt.substring(0, 150);
+            }} catch(e) {{
+                return 'erro: ' + String(e);
+            }}
+        }}
+    """)
+    print(f"✅ [Atende] Resultado v2.31: {resultado_js}")
+    await page.wait_for_timeout(3000)
+
+    # Tenta clique normal também como fallback
+    await page.evaluate("""
+        () => {
+            const btn = document.querySelector("button[name='btn_entrar']");
+            if (btn) btn.click();
+        }
+    """)
+    btn_clicado = True
+
+    if not btn_clicado:
+        await _screenshot_debug(page, "05_erro_botao")
+        return False
+
+
+    # CORREÇÃO v2.26: após clicar Entrar o WPO processa o login e abre
+    # a janela IPM com logo "ipm fiscal" e botão "Acessar" azul.
+    # Confirmado nas screenshots: o login NÃO tem captcha.
+    # O captcha aparece DEPOIS ao clicar o botão Acessar.
+    # Verificamos por múltiplos sinais no DOM.
+    print("⏳ [Atende] Aguardando tela IPM pós-login...")
+    for t in range(20):
+        await page.wait_for_timeout(3000)
+        url_atual = page.url
+
+        # Verifica se URL mudou para sistema (captcha já resolvido)
+        if "sistema" in url_atual:
+            print(f"✅ [Atende] Sistema carregado: {url_atual}")
+            return True
+
+        # Verifica presença da tela IPM com botão Acessar
+        sinal = await page.evaluate("""
+            () => {
+                // Sinal mais confiável: botão "Acessar" visível que não é btn_entrar
+                const btns = Array.from(document.querySelectorAll('button, input[value="Acessar"]'));
+                for (const b of btns) {
+                    const txt = b.textContent.trim();
+                    const name = b.getAttribute('name') || '';
+                    if (txt === 'Acessar' && name !== 'btn_entrar' && b.offsetParent !== null) {
+                        return 'botao_acessar_visivel';
+                    }
+                }
+
+                // Sinal 2: janela com id "janela_TIMESTAMP"
+                if (document.querySelector('[id^="janela_"]')) return 'janela_id';
+
+                // Sinal 3: classes específicas da tela IPM
+                if (document.querySelector('.janela_ipm, .container-servico-fiscal')) return 'janela_classe';
+
+                // Sinal 4: imagem do logo IPM
+                const imgs = Array.from(document.querySelectorAll('img'));
+                if (imgs.some(img => (img.src || '').includes('ipm') || (img.alt || '').toLowerCase().includes('ipm'))) {
+                    return 'logo_ipm';
+                }
+
+                return null;
+            }
+        """)
+
+        if sinal:
+            print(f"✅ [Atende] Tela IPM detectada ({sinal}) — login bem-sucedido!")
+            return True
+
+        if t == 2:
+            # Diagnóstico na tentativa 3 — busca mais ampla
+            diag = await page.evaluate("""
+                () => {
+                    // Todos os elementos clicáveis com texto
+                    const clicaveis = Array.from(document.querySelectorAll(
+                        'button, input[type=button], input[type=submit], a, [onclick], [class*=botao], [class*=btn]'
+                    )).filter(el => el.textContent.trim().length > 0 || el.value)
+                      .map(el => ({
+                          tag: el.tagName,
+                          name: el.name || '',
+                          value: el.value || '',
+                          text: el.textContent.trim().substring(0,30),
+                          class: el.className.substring(0,50),
+                          visible: el.offsetParent !== null
+                      })).filter(el => el.visible);
+                    return clicaveis;
+                }
+            """)
+            print(f"🔍 [Atende] Elementos clicáveis visíveis tentativa 3: {diag}")
+
+            # Verifica texto visível da página
+            texto = await page.evaluate("""
+                () => {
+                    const clone = document.body.cloneNode(true);
+                    clone.querySelectorAll('style,script').forEach(e => e.remove());
+                    return (clone.innerText || clone.textContent || '').substring(0, 500);
+                }
+            """)
+            print(f"📝 [Atende] Texto visível tentativa 3: {texto}")
+
+        print(f"   Aguardando tela IPM... {t+1}/20")
+
+    print(f"❌ [Atende] Tela IPM não apareceu. URL: {page.url}")
+    return False
+
+async def _clicar_acessar_e_resolver_captcha(page: Page) -> bool:
+    """
+    Fluxo real confirmado pelas screenshots (01/05/2026):
+      1. Tela IPM mostra botão azul "Acessar" embaixo do logo IPM Fiscal
+      2. Clicar Acessar → abre modal WPO "Verificação de acesso"
+      3. Modal contém reCAPTCHA v2 com checkbox "Não sou um robô"
+      4. Clicar no checkbox → fecha modal e redireciona para #!/sistema/66
+    """
+    print("🖱️  [Atende] Procurando botão Acessar (IPM Fiscal)...")
+    await page.wait_for_timeout(2000)
+    await _screenshot_debug(page, "07_pre_acessar")
+
+    # Clica no botão Acessar azul da janela IPM
+    seletores_acessar = [
+        "button:has-text('Acessar')",
+        "input[value='Acessar']",
+        "a:has-text('Acessar')",
+        "[class*='botao']:has-text('Acessar')",
+        ".janela_ipm button",
+        ".container-servico-fiscal button",
+    ]
+
+    acessar_clicado = False
+    for sel in seletores_acessar:
+        elem = page.locator(sel).first
+        if await elem.count() > 0:
+            try:
+                await elem.click(force=True, timeout=5000)
+                print(f"✅ [Atende] Acessar clicado: {sel}")
+                acessar_clicado = True
+                break
+            except Exception as e:
+                print(f"⚠️  [Atende] Acessar falhou ({sel}): {e}")
+
+    if not acessar_clicado:
+        print("⚠️  [Atende] Botão Acessar não encontrado")
+
+    # Aguarda o modal WPO de verificação aparecer
+    print("⏳ [Atende] Aguardando modal de verificação de acesso...")
+    await page.wait_for_timeout(3000)
+    await _screenshot_debug(page, "08_modal_captcha")
+
+    # O modal tem título "Verificação de acesso" e contém o reCAPTCHA
+    # O iframe do reCAPTCHA está DENTRO do modal WPO — não na página principal
+    for tentativa in range(15):
+        await page.wait_for_timeout(2000)
+
+        # Verifica se já redirecionou para o sistema (captcha resolvido automaticamente)
+        if "sistema" in page.url:
+            print(f"✅ [Atende] Redirecionado sem captcha: {page.url}")
+            return True
+
+        # Procura o iframe do reCAPTCHA em todos os frames disponíveis
+        iframe_count = await page.locator("iframe[src*='recaptcha']").count()
+
+        if iframe_count > 0:
+            if tentativa == 0:
+                print(f"🤖 [Atende] reCAPTCHA detectado — usando CapSolver...")
+            await _screenshot_debug(page, f"08_captcha_{tentativa}")
+
+            try:
+                # CORREÇÃO v3.0 (CapSolver): resolve o reCAPTCHA v2 do modal
+                # via serviço externo CapSolver. Sitekey identificado nos logs:
+                # 6LdPM3ksAAAAAJuwC8jAVFyDghcb8Aj804E9SFQp
+                # Após resolver, chama processaAcessoToken com o token válido.
+
+                # Extrai sitekey do iframe URL
+                sitekey = "6LdPM3ksAAAAAJuwC8jAVFyDghcb8Aj804E9SFQp"  # fixo para Atende.Net
+                for frame in page.frames:
+                    if 'recaptcha' in frame.url and 'anchor' in frame.url:
+                        # Extrai sitekey da URL do iframe dinamicamente
+                        import re
+                        match = re.search(r'[?&]k=([^&]+)', frame.url)
+                        if match:
+                            sitekey = match.group(1)
+                            print(f"🔑 [Atende] Sitekey extraído: {sitekey}")
+                        break
+
+                # Resolve via CapSolver (só na primeira tentativa para não gastar créditos)
+                if tentativa == 0:
+                    token_capsolver = await _resolver_captcha_capsolver(
+                        sitekey=sitekey,
+                        page_url=page.url
+                    )
+                else:
+                    token_capsolver = None  # aguarda resultado do polling anterior
+
+                if token_capsolver:
+                    print(f"✅ [Atende] Token CapSolver obtido — injetando...")
+
+                    # Injeta token e chama processaAcessoToken
+                    resultado = await page.evaluate(f"""
+                        async () => {{
+                            const token = '{token_capsolver}';
+                            try {{
+                                // Injeta em g-recaptcha-response
+                                let field = document.querySelector('[name="g-recaptcha-response"]');
+                                if (!field) {{
+                                    field = document.createElement('textarea');
+                                    field.name = 'g-recaptcha-response';
+                                    field.style.display = 'none';
+                                    document.body.appendChild(field);
+                                }}
+                                field.value = token;
+
+                                // Chama processaAcessoToken diretamente
+                                if (typeof processaAcessoToken === 'function') {{
+                                    processaAcessoToken(token);
+                                    return 'processaAcessoToken_ok';
+                                }}
+
+                                // Fallback: fetch direto para o endpoint correto
+                                const endpoint = window.location.origin
+                                    + '/autoatendimento/servicos/atende.php'
+                                    + '?rot=63064&aca=101&ajax=t&processo=processaDados'
+                                    + '&ajaxPrevent=' + Date.now();
+                                const r = await fetch(endpoint, {{
+                                    method: 'POST',
+                                    headers: {{
+                                        'Content-Type': 'application/x-www-form-urlencoded',
+                                        'X-Requested-With': 'XMLHttpRequest'
+                                    }},
+                                    body: 'g-recaptcha-response=' + encodeURIComponent(token)
+                                        + '&chave=null&caller=null&parametro=%7B%7D'
+                                        + '&autoId=1&monitor=0&flush=0'
+                                        + '&versaoSistema=v2&portalCidadao=true',
+                                    credentials: 'include'
+                                }});
+                                const txt = await r.text();
+                                return 'fetch:' + r.status + ':' + txt.substring(0, 150);
+                            }} catch(e) {{
+                                return 'erro: ' + String(e);
+                            }}
+                        }}
+                    """)
+                    print(f"🤖 [Atende] Resultado injeção CapSolver: {resultado}")
+                    await page.wait_for_timeout(5000)
+
+                    # Verifica se redirecionou para o sistema
+                    if "sistema" in page.url:
+                        print(f"✅ [Atende] Sistema carregado após CapSolver!")
+                        return True
+
+            except Exception as e:
+                print(f"⚠️  [Atende] Erro no captcha tentativa {tentativa+1}: {e}")
+
+        # Verifica se o modal fechou (captcha resolvido)
+        modal_aberto = await page.locator("text=Verificação de acesso").count()
+        if modal_aberto == 0 and tentativa > 0:
+            print("✅ [Atende] Modal fechou — captcha resolvido!")
+            await page.wait_for_timeout(3000)
+            if "sistema" in page.url:
+                return True
+
+        print(f"   Aguardando captcha... tentativa {tentativa+1}/15 | URL: {page.url[:60]}")
+
+    print("❌ [Atende] Captcha não resolvido após 15 tentativas")
+    await _screenshot_debug(page, "09_captcha_timeout")
+    return False
+
+
+# ============================================================
+# PASSO 5: CAPTCHA
+# Com stealth ativo, o captcha comportamental passa automaticamente.
+# Tenta clicar no checkbox se aparecer.
+# ============================================================
+async def _resolver_captcha(page: Page) -> bool:
+    print("🤖 [Atende] Verificando captcha...")
+    await page.wait_for_timeout(3000)
+    await _screenshot_debug(page, "08_captcha_check")
+
+    if await page.locator("iframe[src*='recaptcha']").count() == 0:
+        print("✅ [Atende] Sem captcha — stealth funcionou!")
+        return True
+
+    try:
+        iframe = page.frame_locator("iframe[src*='recaptcha']").first
+        checkbox = iframe.locator("#recaptcha-anchor").first
+        if await checkbox.count() > 0:
+            await checkbox.click(timeout=10000)
+            await page.wait_for_timeout(4000)
+            await _screenshot_debug(page, "09_pos_captcha")
+
+            if await page.locator("iframe[src*='bframe']").count() > 0:
+                print("❌ [Atende] Captcha de imagens — resolução automática indisponível")
+                return False
+
+            print("✅ [Atende] Captcha resolvido com clique")
+            return True
+    except Exception as e:
+        print(f"⚠️  [Atende] Erro no captcha: {e}")
+
+    print("✅ [Atende] Continuando após captcha")
+    return True
+
+
+# ============================================================
+# PASSO 6-7: AGUARDAR SISTEMA E FECHAR POPUP
+# ============================================================
+async def _aguardar_sistema_e_fechar_popup(page: Page):
+    # CORREÇÃO v2.15: o login já aguarda o redirecionamento com captcha.
+    # Esta função agora só fecha popups e garante que a tela está estável.
+    print(f"⏳ [Atende] Verificando tela pós-login — URL: {page.url}")
+    await page.wait_for_timeout(3000)
+
+    await page.wait_for_timeout(3000)
+    await _screenshot_debug(page, "10_sistema")
+
+    for sel in ["button:has-text('Fechar')", "button:has-text('OK')",
+                "button:has-text('Entendido')", "button:has-text('×')",
+                "[aria-label='Close']", "[aria-label='Fechar']"]:
+        elem = page.locator(sel).first
+        if await elem.count() > 0:
+            try:
+                await elem.click(force=True, timeout=3000)
+                print(f"✅ [Atende] Popup fechado: {sel}")
+                await page.wait_for_timeout(1000)
+                break
+            except Exception:
+                pass
+
+    await _screenshot_debug(page, "11_pos_popup")
+
+
+# ============================================================
+# PASSO 8: CARD "GERENCIAMENTO DE NOTAS"
+# ============================================================
+async def _abrir_gerenciamento_notas(page: Page) -> bool:
+    # CORREÇÃO v2.26: fluxo confirmado pelas screenshots (01/05/2026):
+    #   1. Após captcha → sistema #!/sistema/66 carrega
+    #   2. Popup "Avisos" aparece → fechar com botão "Fechar"
+    #   3. Painel do Gestor mostra card "Gerenciamento de Notas"
+    #   4. Clicar no card abre a tela de consulta de NFS-e
+    # com links de serviços fiscais. O correto é clicar em um desses links
+    # para abrir o sistema de NFS-e. Os links disponíveis identificados:
+    #   - "Web Service de Emissão de Nota Fiscal Eletrônica"
+    #   - "Importação de Documentos Fiscais"
+    #   - "Gerenciamento de Notas" (pode aparecer após navegar)
+    #
+    # Estratégia: fecha a janela IPM e navega para a URL do sistema,
+    # ou clica no link correto dentro da janela IPM.
+
+    print("🗂️  [Atende] Navegando para o sistema de NFS-e...")
+    await page.wait_for_timeout(3000)
+    await _screenshot_debug(page, "12_pre_navegacao")
+
+    # PASSO 1: fecha o popup de aviso de manutenção se ainda existir
+    await page.evaluate("""
+        () => {
+            const aviso = document.getElementById('aviso_manutencao');
+            if (aviso) aviso.style.cssText = 'display:none!important';
+        }
+    """)
+
+    # PASSO 2: aguarda o captcha ser resolvido e o sistema carregar
+    # O log mostrou que após clicar Acessar aparece o modal de captcha.
+    # Precisamos aguardar o captcha ser resolvido antes de navegar.
+    print("🌐 [Atende] Aguardando sistema após captcha...")
+    await page.wait_for_timeout(5000)
+    await _screenshot_debug(page, "12_sistema_url")
+
+    # Verifica se chegou no sistema #!/sistema/66
+    if "sistema" in page.url:
+        print(f"✅ [Atende] Sistema carregado: {page.url}")
+        return True
+
+    # Se ainda não está no sistema, tenta navegar diretamente
+    try:
+        base_url = page.url.split('/autoatendimento')[0]
+        sistema_url = f"{base_url}/?rot=1&aca=1#!/sistema/66"
+        print(f"🌐 [Atende] Navegando para: {sistema_url}")
+        await page.goto(sistema_url, wait_until="networkidle", timeout=30000)
+        await page.wait_for_timeout(3000)
+        print(f"✅ [Atende] Navegou para: {page.url}")
+        await _screenshot_debug(page, "12_sistema_navegado")
+
+        if "sistema" in page.url or await page.locator("text=Gerenciamento").count() > 0:
+            print("✅ [Atende] Sistema carregado via URL direta")
+            return True
+    except Exception as e:
+        print(f"⚠️  [Atende] Navegação direta falhou: {e}")
+
+    # PASSO 3: tenta clicar nos links da janela IPM
+    # PASSO 1: fecha popup "Avisos" que aparece ao entrar no sistema
+    print("🔔 [Atende] Fechando popup de Avisos...")
+    for sel_fechar in ["button:has-text('Fechar')", "input[value='Fechar']",
+                        "[class*='wpo-fechar']", "button:has-text('OK')"]:
+        elem = page.locator(sel_fechar).first
+        if await elem.count() > 0:
+            try:
+                await elem.click(force=True, timeout=3000)
+                print(f"✅ [Atende] Popup Avisos fechado: {sel_fechar}")
+                await page.wait_for_timeout(1500)
+                break
+            except Exception:
+                pass
+
+    await _screenshot_debug(page, "12_pos_avisos")
+
+    # PASSO 2: clica no card "Gerenciamento de Notas" do Painel do Gestor
+    # Confirmado na screenshot 6: card com texto "Gerenciamento de Notas"
+    print("🗂️  [Atende] Clicando no card 'Gerenciamento de Notas'...")
+    seletores_card = [
+        "text=Gerenciamento de Notas",
+        ":text('Gerenciamento de Notas')",
+        "div:has-text('Gerenciamento de Notas')",
+        "a:has-text('Gerenciamento de Notas')",
+        "[class*='card']:has-text('Gerenciamento')",
+        "div[class*='item']:has-text('Gerenciamento')",
+        # Fallback pelo texto parcial
+        "text=Gerenciamento",
+    ]
+
+    for sel in seletores_card:
+        try:
+            elem = page.locator(sel).first
+            if await elem.count() > 0:
+                print(f"🖱️  [Atende] Card encontrado: {sel}")
+                await elem.click(force=True, timeout=5000)
+                await page.wait_for_timeout(3000)
+                await _screenshot_debug(page, "13_gerenciamento_notas")
+                print(f"✅ [Atende] Card clicado — URL: {page.url}")
+                return True
+        except Exception as e:
+            print(f"⚠️  [Atende] Card falhou ({sel}): {e}")
+
+    # Diagnóstico se não encontrou
+    elementos = await page.evaluate("""
+        () => Array.from(document.querySelectorAll('*'))
+            .filter(el => el.textContent.trim() === 'Gerenciamento de Notas' && el.offsetParent !== null)
+            .map(el => ({tag: el.tagName, class: el.className.substring(0,60)}))
+    """)
+    print(f"🔍 [Atende] Elementos 'Gerenciamento de Notas': {elementos}")
+    await _screenshot_debug(page, "12_erro_card")
+    return False
+
+
+# ============================================================
+# PASSO 9-10: FILTRO COMPETÊNCIA + CONSULTAR
+# data_inicio "01/02/2026" → competência "02/2026"
+# ============================================================
+async def _filtrar_competencia_e_consultar(page: Page, data_inicio: str) -> bool:
+
+    def extrair_competencia(d: str) -> str:
+        if "-" in d and len(d) == 10:       # YYYY-MM-DD
+            p = d.split("-")
+            return f"{p[1]}/{p[0]}"
+        elif "/" in d and len(d) == 10:     # DD/MM/YYYY
+            p = d.split("/")
+            return f"{p[1]}/{p[2]}"
+        return d
+
+    competencia = extrair_competencia(data_inicio)
+    print(f"📅 [Atende] Competência: {competencia}")
+    await page.wait_for_timeout(2000)
+
+    # Seleciona "Competência" no dropdown
+    for sel in ["select[name*='filtro']", "select[id*='filtro']",
+                "select[name*='tipo']", "select:visible"]:
+        elem = page.locator(sel).first
+        if await elem.count() > 0:
+            try:
+                await elem.select_option(label="Competência", timeout=3000)
+                print(f"✅ [Atende] Competência selecionada: {sel}")
+                await page.wait_for_timeout(1000)
+                break
+            except Exception:
+                try:
+                    await elem.select_option(value="competencia", timeout=3000)
+                    break
+                except Exception:
+                    pass
+
+    # Campo de data MM/YYYY
+    campo_data = None
+    for sel in ["input[placeholder*='MM/AAAA']", "input[placeholder*='mm/aaaa']",
+                "input[placeholder*='ompet']", "input[name*='competencia']",
+                "input[id*='competencia']", "input[name*='data']",
+                "input[type='text']:visible"]:
+        elem = page.locator(sel).first
+        if await elem.count() > 0:
+            print(f"✅ [Atende] Campo competência: {sel}")
+            campo_data = elem
+            break
+
+    if campo_data:
+        await campo_data.scroll_into_view_if_needed()
+        await campo_data.click(click_count=3)
+        await page.keyboard.type(competencia, delay=80)
+        await campo_data.dispatch_event("input")
+        await campo_data.dispatch_event("change")
+        print(f"✏️  [Atende] Competência: {competencia}")
+        await page.wait_for_timeout(1000)
+    else:
+        print("⚠️  [Atende] Campo de competência não encontrado")
+
+    await _screenshot_debug(page, "13_filtro_preenchido")
+
+    # Clica em Consultar
+    for sel in ["button:has-text('Consultar')", "button:has-text('Pesquisar')",
+                "button:has-text('Buscar')", "input[value='Consultar']"]:
+        elem = page.locator(sel).first
+        if await elem.count() > 0:
+            try:
+                await elem.click(force=True, timeout=5000)
+                print(f"✅ [Atende] Consultar: {sel}")
+                await page.wait_for_timeout(5000)
+                await _screenshot_debug(page, "14_resultados")
+                return True
+            except Exception as e:
+                print(f"⚠️  [Atende] Consultar falhou ({sel}): {e}")
+
+    print("❌ [Atende] Botão Consultar não encontrado")
+    await _screenshot_debug(page, "14_erro_consultar")
+    return False
+
+
+# ============================================================
+# PASSO 11-12: DOWNLOAD TODOS → XML IPM
+# ============================================================
+async def _baixar_xml_ipm(page: Page, download_dir: str):
+    print("📥 [Atende] Procurando 'Download Todos'...")
+
+    btn_download = None
+    for sel in ["button:has-text('Download Todos')", "button:has-text('Download')",
+                "a:has-text('Download Todos')", "a:has-text('Download')"]:
+        elem = page.locator(sel).first
+        if await elem.count() > 0:
+            btn_download = elem
+            print(f"✅ [Atende] Botão Download: {sel}")
+            break
+
+    if not btn_download:
+        print("❌ [Atende] Botão Download não encontrado")
+        await _screenshot_debug(page, "15_erro_download")
+        return None
+
+    await btn_download.click(force=True)
+    await page.wait_for_timeout(2000)
+    await _screenshot_debug(page, "15_dropdown_download")
+
+    opcao_xml = None
+    for sel in ["text=XML IPM", "a:has-text('XML IPM')",
+                "button:has-text('XML IPM')", "li:has-text('XML IPM')", "text=XML"]:
+        elem = page.locator(sel).first
+        if await elem.count() > 0:
+            opcao_xml = elem
+            print(f"✅ [Atende] XML IPM: {sel}")
+            break
+
+    if not opcao_xml:
+        print("❌ [Atende] Opção XML IPM não encontrada")
+        await _screenshot_debug(page, "15_erro_xml_ipm")
+        return None
+
+    print("⏳ [Atende] Aguardando download...")
+    try:
+        async with page.expect_download(timeout=60000) as download_info:
+            await opcao_xml.click(force=True)
+
+        download = await download_info.value
+        nome_arquivo = download.suggested_filename or "nfse_ipm.zip"
+        caminho_destino = os.path.join(download_dir, nome_arquivo)
+        await download.save_as(caminho_destino)
+        print(f"✅ [Atende] Download: {caminho_destino}")
+        return caminho_destino
+
+    except Exception as e:
+        print(f"❌ [Atende] Erro no download: {e}")
+        await _screenshot_debug(page, "16_erro_download")
         return None
 
 
 # ============================================================
-# FUNÇÃO PRINCIPAL: IMPORTAR VIA ATENDE (WebService SOAP)
-# Chamada pelo endpoint POST /importar-notas-municipal
+# FUNÇÃO PRINCIPAL: IMPORTAR VIA ATENDE
+# Ponto de entrada chamado por POST /importar-notas-municipal
 # ============================================================
 async def importar_via_atende(
     portal_url: str,
@@ -323,81 +1281,66 @@ async def importar_via_atende(
     data_fim: str,
 ) -> dict:
 
-    config = _get_portal_config(portal_url)
-    if not config:
-        raise Exception(f"Portal não suportado: {portal_url}")
+    municipio = next(
+        (nome for host, nome in PORTAIS_ATENDE.items() if host in portal_url),
+        "Município desconhecido"
+    )
+    print(f"🏙️  [Atende] ══════════════════════════════════")
+    print(f"🏙️  [Atende] {municipio} | {data_inicio} → {data_fim}")
+    print(f"   Stealth: {'✅ ativo' if STEALTH_DISPONIVEL else '❌ inativo'}")
+    print(f"🏙️  [Atende] ══════════════════════════════════")
 
-    municipio = config["nome"]
-    ws_url = config.get("ws_urls", [""])[0]  # URL principal (fallback)
+    download_dir = tempfile.mkdtemp(prefix="atende_download_")
+    p, browser, context, page = await criar_browser_atende()
 
-    print(f"🏙️  [Atende SOAP] ══════════════════════════════")
-    print(f"🏙️  [Atende SOAP] {municipio} | {data_inicio} → {data_fim}")
-    print(f"   WebService: {ws_url}")
-    print(f"   Usuário   : {usuario}")
-    print(f"🏙️  [Atende SOAP] ══════════════════════════════")
+    try:
+        # 1-3: Login
+        if not await _fazer_login(page, portal_url, usuario, senha):
+            raise Exception(
+                f"Falha no login em {portal_url}. Verifique usuário/senha. "
+                "Veja logs /tmp/atende_debug_*.png no Railway."
+            )
 
-    # Extrai CNPJ do usuário (campo portal_usuario é o CNPJ/CPF)
-    cnpj = usuario
+        # 4: Clica Acessar e resolve captcha (fluxo real confirmado 01/05/2026)
+        captcha_ok = await _clicar_acessar_e_resolver_captcha(page)
+        if not captcha_ok:
+            print("⚠️  [Atende] Captcha não resolvido — tentando continuar mesmo assim")
 
-    notas = []
-    xml_resposta = None
-    ws_urls = config.get("ws_urls", [config.get("ws_url", "")])
+        # 5: Captcha já resolvido em _clicar_acessar_e_resolver_captcha acima
 
-    # ── Testa todos os endpoints em ordem ────────────────────
-    for idx, ws_url_atual in enumerate(ws_urls):
-        print(f"🔄 [Atende SOAP] Endpoint {idx+1}/{len(ws_urls)}: {ws_url_atual}")
+        # 6-7: Sistema + popup
+        await _aguardar_sistema_e_fechar_popup(page)
 
-        # Verifica se endpoint existe (GET)
-        async with httpx.AsyncClient(verify=False, timeout=10) as client:
-            try:
-                r = await client.get(f"{ws_url_atual}?WSDL")
-                print(f"   WSDL status: {r.status_code}")
-                if r.status_code == 404:
-                    print(f"   ❌ Endpoint 404 — pulando")
-                    continue
-                if r.status_code == 200:
-                    print(f"   ✅ WSDL encontrado: {r.text[:200]}")
-            except Exception as e:
-                print(f"   ⚠️  Erro ao verificar WSDL: {e}")
-                continue
+        # 8: Card
+        if not await _abrir_gerenciamento_notas(page):
+            raise Exception(
+                "Card 'Gerenciamento de Notas' não encontrado. "
+                "Veja /tmp/atende_debug_12_erro_card_*.png"
+            )
 
-        # Tentativa ABRASF padrão
-        soap1 = _montar_soap_consultar_nfse(cnpj, usuario, senha, data_inicio, data_fim)
-        resp = await _chamar_webservice(
-            ws_url_atual, soap1,
-            soap_action="http://nfse.abrasf.org.br/ConsultarNfseServicoPrestado"
-        )
-        if resp:
-            print(f"   Resposta ABRASF: {resp[:300]}")
-            notas_encontradas = _parsear_notas_xml(resp)
-            if notas_encontradas:
-                notas = notas_encontradas
-                xml_resposta = resp
-                print(f"✅ [Atende SOAP] ABRASF OK em {ws_url_atual} — {len(notas)} notas")
-                break
+        # 9-10: Filtro + Consultar
+        if not await _filtrar_competencia_e_consultar(page, data_inicio):
+            raise Exception(
+                "Filtro de competência falhou. "
+                "Veja /tmp/atende_debug_14_erro_consultar_*.png"
+            )
 
-        # Tentativa IPM alternativa
-        soap2 = _montar_soap_ipm(cnpj, usuario, senha, data_inicio, data_fim)
-        resp2 = await _chamar_webservice(
-            ws_url_atual, soap2,
-            soap_action="consultarNfseServicoPrestado"
-        )
-        if resp2:
-            print(f"   Resposta IPM: {resp2[:300]}")
-            notas_encontradas2 = _parsear_notas_xml(resp2)
-            if notas_encontradas2:
-                notas = notas_encontradas2
-                xml_resposta = resp2
-                print(f"✅ [Atende SOAP] IPM OK em {ws_url_atual} — {len(notas)} notas")
-                break
-            xml_resposta = resp2  # guarda mesmo sem notas para diagnóstico
+        # 11-12: Download XML IPM
+        caminho_arquivo = await _baixar_xml_ipm(page, download_dir)
+        if not caminho_arquivo:
+            raise Exception(
+                "Download XML IPM falhou. Veja /tmp/atende_debug_15_*.png"
+            )
 
-    print(f"🏁 [Atende SOAP] Concluído — {len(notas)} nota(s) encontrada(s)")
+        print(f"🏁 [Atende] ✅ Concluído: {caminho_arquivo}")
+        return {
+            "status": "concluido",
+            "municipio": municipio,
+            "arquivo": caminho_arquivo,
+            "nome_arquivo": os.path.basename(caminho_arquivo),
+            "tamanho_bytes": os.path.getsize(caminho_arquivo),
+            "competencia": data_inicio,
+        }
 
-    return {
-        "status": "concluido",
-        "municipio": municipio,
-        "notas_encontradas": len(notas),
-        "notas": notas,
-        "xml_bruto": xml_resposta[:2000] if xml_resposta else None,
-    }
+    finally:
+        await fechar_browser_atende(p, browser)
