@@ -526,8 +526,9 @@ async def importar_notas_municipal(req: ImportRequest):
     print(f"   Período : {req.data_inicio} → {req.data_fim}")
 
     try:
-        # [NOVO v2] Chama o scraper do Atende.Net (atende_scraper.py)
-        notas = await importar_via_atende(
+        # [NOVO v2] Chama o SOAP do Atende.Net (atende_scraper.py)
+        # Retorno pode ser dict (SOAP) ou list (legado) — normaliza aqui
+        resultado = await importar_via_atende(
             portal_url=req.portal_url,
             usuario=req.portal_usuario,
             senha=req.portal_senha,
@@ -535,18 +536,28 @@ async def importar_notas_municipal(req: ImportRequest):
             data_fim=req.data_fim,
         )
 
-        print(f"✅ [v2] Importação municipal concluída: {len(notas)} nota(s) encontrada(s)")
+        if isinstance(resultado, dict):
+            notas    = resultado.get("notas", [])
+            xml_bruto = resultado.get("xml_bruto")
+            municipio = resultado.get("municipio", "")
+        else:
+            notas     = resultado if isinstance(resultado, list) else []
+            xml_bruto = None
+            municipio = ""
 
-        # [NOVO v2] Retorna no mesmo formato que o frontend espera
+        print(f"✅ [v2] Importação municipal concluída: {len(notas)} nota(s)")
+
         return {
-            "status": "concluido",
-            "cliente_id": req.cliente_id,
-            "cnpj": req.cnpj,
-            "portal": req.portal_url,
-            "data_inicio": req.data_inicio,
-            "data_fim": req.data_fim,
+            "status":           "concluido",
+            "cliente_id":       req.cliente_id,
+            "cnpj":             req.cnpj,
+            "portal":           req.portal_url,
+            "municipio":        municipio,
+            "data_inicio":      req.data_inicio,
+            "data_fim":         req.data_fim,
             "notas_encontradas": len(notas),
-            "notas": notas,
+            "notas":            notas,
+            "xml_bruto":        xml_bruto,
         }
 
     except HTTPException:
