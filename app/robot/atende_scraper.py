@@ -493,239 +493,166 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
         await _screenshot_debug(page, "05_erro_botao")
         return False
 
-    # CORREÇÃO v2.15: aguarda até 40s para o sistema redirecionar.
-    # O fluxo real é: clica Entrar → aparece captcha → resolve captcha
-    # → ENTÃO redireciona. Não verificamos URL imediatamente.
-    print("⏳ [Atende] Aguardando redirecionamento pós-login (captcha pode aparecer)...")
-    for t in range(20):
+    # CORREÇÃO v2.23: após clicar Entrar, o portal abre uma janela IPM
+    # (janela_ipm / container-servico-fiscal) com links de serviços fiscais.
+    # Isso CONFIRMA que o login foi bem-sucedido — não é captcha.
+    # A URL pode não mudar (SPA), mas o DOM muda completamente.
+    print("⏳ [Atende] Aguardando login ser processado...")
+    for t in range(15):
         await page.wait_for_timeout(2000)
         url_atual = page.url
 
-        # Verifica se saiu da página de login
-        if "sistema" in url_atual or (
-            "autoatendimento" not in url_atual and "login" not in url_atual.lower()
-        ):
-            print(f"✅ [Atende] Login ok — URL: {url_atual}")
+        # Verifica se URL mudou para sistema
+        if "sistema" in url_atual:
+            print(f"✅ [Atende] Login ok via URL: {url_atual}")
             return True
 
-        # Verifica se há captcha na página e tenta resolver
-        iframe_count = await page.locator("iframe[src*='recaptcha']").count()
-        if iframe_count > 0 and t == 0:  # só loga na primeira detecção
-            print(f"🤖 [Atende] Captcha detectado — tentando resolver...")
+        # CORREÇÃO v2.23: verifica se a janela IPM apareceu no DOM
+        # Isso indica que o login foi aceito (tela de seleção de serviços)
+        janela_ipm = await page.evaluate("""
+            () => {
+                const janela = document.querySelector('.janela_ipm, .container-servico-fiscal, .janela_ipm_frame');
+                if (!janela) return null;
+                // Confirma que tem links de serviços fiscais
+                const links = Array.from(janela.querySelectorAll('a'))
+                    .filter(a => a.textContent.trim().length > 5)
+                    .map(a => a.textContent.trim().substring(0, 60));
+                return links.length > 0 ? links : null;
+            }
+        """)
 
-        if iframe_count > 0:
-            try:
-                # CORREÇÃO v2.20: o token do reCAPTCHA invisible não é acessível
-                # via contentDocument (cross-origin iframe google.com).
-                # Usamos o Playwright frame API para acessar o frame diretamente.
-                # Além disso, o reCAPTCHA invisible gera o token APÓS execução
-                # e o deposita em g-recaptcha-response na página principal.
+        if janela_ipm:
+            print(f"✅ [Atende] Login ok — janela IPM detectada com links: {janela_ipm}")
+            return True
 
-                # Passo 1: tenta ler token do frame do reCAPTCHA via Playwright
-                token = None
-                for frame in page.frames:
-                    if 'recaptcha' in frame.url and 'anchor' in frame.url:
-                        try:
-                            token_val = await frame.evaluate(
-                                "() => { const el = document.getElementById('recaptcha-token'); return el ? el.value : null; }"
-                            )
-                            if token_val:
-                                token = token_val
-                                print(f"✅ [Atende] Token lido do frame: {token[:30]}...")
-                                break
-                        except Exception as fe:
-                            print(f"⚠️  [Atende] Erro lendo frame: {fe}")
+        print(f"   Tentativa {t+1}/15 — URL: {url_atual[:80]}")
 
-                # Passo 2: tenta ler g-recaptcha-response da página principal
-                if not token:
-                    token = await page.evaluate("""
-                        () => {
-                            const el = document.querySelector('[name="g-recaptcha-response"]');
-                            return el ? el.value : null;
-                        }
-                    """)
-                    if token:
-                        print(f"✅ [Atende] Token em g-recaptcha-response: {token[:30]}...")
-
-                # Passo 3: força execução do grecaptcha para gerar o token
-                if not token:
-                    print("🔄 [Atende] Forçando grecaptcha.execute()...")
-                    await page.evaluate("""
-                        () => {
-                            try {
-                                if (typeof grecaptcha !== 'undefined') {
-                                    // execute() dispara o reCAPTCHA invisible
-                                    // e chama o callback quando aprovado
-                                    grecaptcha.execute();
-                                }
-                            } catch(e) {}
-                        }
-                    """)
-                    await page.wait_for_timeout(5000)
-
-                    # Aguarda o token aparecer após execute()
-                    token = await page.evaluate("""
-                        () => {
-                            const el = document.querySelector('[name="g-recaptcha-response"]');
-                            return el ? el.value : null;
-                        }
-                    """)
-                    if token:
-                        print(f"✅ [Atende] Token após execute(): {token[:30]}...")
-
-                # Passo 4: injeta token e dispara callback
-                if token:
-                    resultado = await page.evaluate(f"""
-                        () => {{
-                            const token = '{token}';
-
-                            // Injeta em todos os campos g-recaptcha-response
-                            document.querySelectorAll('[name="g-recaptcha-response"]').forEach(el => {{
-                                el.value = token;
-                            }});
-
-                            // Dispara callback do grecaptcha
-                            try {{
-                                const cfg = ___grecaptcha_cfg;
-                                if (cfg && cfg.clients) {{
-                                    for (const client of Object.values(cfg.clients)) {{
-                                        for (const key of Object.keys(client)) {{
-                                            if (client[key] && typeof client[key].callback === 'function') {{
-                                                client[key].callback(token);
-                                                return 'callback_' + key;
-                                            }}
-                                        }}
-                                    }}
-                                }}
-                            }} catch(e) {{}}
-
-                            // Tenta submit do form como fallback
-                            const btn = document.querySelector("button[name='btn_entrar']");
-                            if (btn) {{ btn.click(); return 'btn_entrar_click'; }}
-
-                            const form = document.querySelector('form');
-                            if (form) {{ form.submit(); return 'form_submit'; }}
-
-                            return 'token_sem_callback';
-                        }}
-                    """)
-                    print(f"🤖 [Atende] Resultado injeção token: {resultado}")
-                    await page.wait_for_timeout(4000)
-                else:
-                    print(f"⚠️  [Atende] Token não disponível na tentativa {t+1}")
-
-            except Exception as e:
-                if t == 0:
-                    print(f"⚠️  [Atende] Captcha erro: {e}")
-
-        # Verifica botão "Acessar" intermediário
-        # CORREÇÃO v2.22: diagnóstico — imprime HTML e todos os botões
-        # visíveis para identificar exatamente qual botão "Acessar" existe
-        if t == 0:
-            try:
-                url_agora = page.url
-                print(f"📄 [Atende] URL pós-Entrar: {url_agora}")
-
-                # Captura só o texto visível da página — ignora CSS/style
-                texto_visivel = await page.evaluate("""
-                    () => {
-                        // Remove style e script tags
-                        const clone = document.body.cloneNode(true);
-                        clone.querySelectorAll('style, script').forEach(el => el.remove());
-                        return clone.innerText || clone.textContent || '';
-                    }
-                """)
-                print(f"📝 [Atende] Texto visível pós-Entrar: {texto_visivel[:3000]}")
-
-                # Lista todos os botões e links com texto
-                try:
-                    botoes = await page.evaluate("""
-                        () => {
-                            const els = Array.from(document.querySelectorAll(
-                                'button, a[href], input[type=button], input[type=submit], [onclick], [class*=botao], [class*=btn]'
-                            ));
-                            return els
-                                .filter(el => el.textContent.trim().length > 0)
-                                .map(el => ({
-                                    tag: el.tagName,
-                                    text: el.textContent.trim().substring(0, 60),
-                                    class: el.className.substring(0, 60),
-                                    visible: el.offsetParent !== null,
-                                    onclick: (el.getAttribute('onclick') || '').substring(0, 60)
-                                }));
-                        }
-                    """)
-                    print(f"🖱️  [Atende] Botões/links pós-Entrar ({len(botoes)}):")
-                    for b in botoes:
-                        v = '✅' if b['visible'] else '❌'
-                        print(f"   {v} {b['tag']} | '{b['text']}' | class='{b['class'][:40]}'")
-                except Exception as be:
-                    print(f"⚠️  [Atende] Erro listando botões: {be}")
-            except Exception as e:
-                print(f"⚠️  [Atende] Diagnóstico: {e}")
-
-        btn_acessar = page.locator("button:has-text('Acessar'), a:has-text('Acessar')").first
-        if await btn_acessar.count() > 0:
-            print(f"🖱️  [Atende] Botão Acessar na tentativa {t+1} — injetando token e clicando...")
-            try:
-                # Re-injeta o token no g-recaptcha-response antes do clique
-                for frame in page.frames:
-                    if 'recaptcha' in frame.url and 'anchor' in frame.url:
-                        try:
-                            tk = await frame.evaluate(
-                                "() => { const el = document.getElementById('recaptcha-token'); return el ? el.value : null; }"
-                            )
-                            if tk:
-                                await page.evaluate(f"""
-                                    () => {{
-                                        let el = document.querySelector('[name="g-recaptcha-response"]');
-                                        if (!el) {{
-                                            el = document.createElement('textarea');
-                                            el.name = 'g-recaptcha-response';
-                                            el.style.display = 'none';
-                                            document.body.appendChild(el);
-                                        }}
-                                        el.value = '{tk}';
-                                    }}
-                                """)
-                                print(f"✅ [Atende] Token re-injetado antes do Acessar")
-                        except Exception:
-                            pass
-                        break
-
-                await btn_acessar.click(force=True, timeout=5000)
-                await page.wait_for_timeout(5000)
-            except Exception as e:
-                print(f"⚠️  [Atende] Erro ao clicar Acessar: {e}")
-
-        print(f"   Aguardando... tentativa {t+1}/20 | URL: {url_atual[:80]}")
-
-    await _screenshot_debug(page, "06_timeout_pos_entrar")
-    print(f"❌ [Atende] Timeout aguardando redirecionamento. URL final: {page.url}")
+    print(f"❌ [Atende] Timeout. URL final: {page.url}")
     return False
-
-
-# ============================================================
-# PASSO 4: BOTÃO "ACESSAR" INTERMEDIÁRIO
-# ============================================================
-async def _clicar_acessar(page: Page):
-    print("🖱️  [Atende] Procurando botão Acessar...")
+async def _clicar_acessar_e_resolver_captcha(page: Page) -> bool:
+    """
+    Fluxo real confirmado pelas screenshots (01/05/2026):
+      1. Tela IPM mostra botão azul "Acessar" embaixo do logo IPM Fiscal
+      2. Clicar Acessar → abre modal WPO "Verificação de acesso"
+      3. Modal contém reCAPTCHA v2 com checkbox "Não sou um robô"
+      4. Clicar no checkbox → fecha modal e redireciona para #!/sistema/66
+    """
+    print("🖱️  [Atende] Procurando botão Acessar (IPM Fiscal)...")
     await page.wait_for_timeout(2000)
+    await _screenshot_debug(page, "07_pre_acessar")
 
-    for sel in ["button:has-text('Acessar')", "a:has-text('Acessar')",
-                "input[value='Acessar']", "button:has-text('Continuar')"]:
+    # Clica no botão Acessar azul da janela IPM
+    seletores_acessar = [
+        "button:has-text('Acessar')",
+        "input[value='Acessar']",
+        "a:has-text('Acessar')",
+        "[class*='botao']:has-text('Acessar')",
+        ".janela_ipm button",
+        ".container-servico-fiscal button",
+    ]
+
+    acessar_clicado = False
+    for sel in seletores_acessar:
         elem = page.locator(sel).first
         if await elem.count() > 0:
             try:
                 await elem.click(force=True, timeout=5000)
                 print(f"✅ [Atende] Acessar clicado: {sel}")
-                await page.wait_for_timeout(3000)
-                await _screenshot_debug(page, "07_pos_acessar")
-                return
+                acessar_clicado = True
+                break
             except Exception as e:
                 print(f"⚠️  [Atende] Acessar falhou ({sel}): {e}")
 
-    print("ℹ️   [Atende] Botão Acessar não encontrado — continuando")
+    if not acessar_clicado:
+        print("⚠️  [Atende] Botão Acessar não encontrado")
+
+    # Aguarda o modal WPO de verificação aparecer
+    print("⏳ [Atende] Aguardando modal de verificação de acesso...")
+    await page.wait_for_timeout(3000)
+    await _screenshot_debug(page, "08_modal_captcha")
+
+    # O modal tem título "Verificação de acesso" e contém o reCAPTCHA
+    # O iframe do reCAPTCHA está DENTRO do modal WPO — não na página principal
+    for tentativa in range(15):
+        await page.wait_for_timeout(2000)
+
+        # Verifica se já redirecionou para o sistema (captcha resolvido automaticamente)
+        if "sistema" in page.url:
+            print(f"✅ [Atende] Redirecionado sem captcha: {page.url}")
+            return True
+
+        # Procura o iframe do reCAPTCHA em todos os frames disponíveis
+        iframe_count = await page.locator("iframe[src*='recaptcha']").count()
+
+        if iframe_count > 0:
+            print(f"🤖 [Atende] reCAPTCHA encontrado na tentativa {tentativa+1}")
+            await _screenshot_debug(page, f"08_captcha_{tentativa}")
+
+            try:
+                # Tenta clicar no checkbox dentro do iframe
+                iframe_loc = page.frame_locator("iframe[src*='recaptcha/api2/anchor']").first
+                checkbox = iframe_loc.locator(".recaptcha-checkbox-border, #recaptcha-anchor").first
+
+                if await checkbox.count() > 0:
+                    # Movimento de mouse simulando humano antes do clique
+                    box = await page.locator("iframe[src*='recaptcha']").first.bounding_box()
+                    if box:
+                        await page.mouse.move(400, 400)
+                        await page.wait_for_timeout(300)
+                        await page.mouse.move(box['x'] + 20, box['y'] + 30)
+                        await page.wait_for_timeout(200)
+
+                    await checkbox.click(timeout=8000)
+                    print("✅ [Atende] Checkbox 'Não sou um robô' clicado!")
+                    await page.wait_for_timeout(5000)
+                    await _screenshot_debug(page, "09_pos_captcha")
+
+                    # Verifica se o captcha foi resolvido
+                    if "sistema" in page.url:
+                        print(f"✅ [Atende] Redirecionado após captcha: {page.url}")
+                        return True
+
+                    # Tenta ler token e chamar callback
+                    for frame in page.frames:
+                        if 'recaptcha' in frame.url and 'anchor' in frame.url:
+                            try:
+                                tk = await frame.evaluate(
+                                    "() => { const el = document.getElementById('recaptcha-token'); return el ? el.value : null; }"
+                                )
+                                if tk:
+                                    print(f"✅ [Atende] Token pós-clique: {tk[:30]}...")
+                                    # Dispara o botão Acessar novamente com token injetado
+                                    await page.evaluate(f"""
+                                        () => {{
+                                            let el = document.querySelector('[name="g-recaptcha-response"]');
+                                            if (!el) {{
+                                                el = document.createElement('textarea');
+                                                el.name = 'g-recaptcha-response';
+                                                el.style.display = 'none';
+                                                document.body.appendChild(el);
+                                            }}
+                                            el.value = '{tk}';
+                                        }}
+                                    """)
+                            except Exception:
+                                pass
+                            break
+            except Exception as e:
+                print(f"⚠️  [Atende] Erro no captcha tentativa {tentativa+1}: {e}")
+
+        # Verifica se o modal fechou (captcha resolvido)
+        modal_aberto = await page.locator("text=Verificação de acesso").count()
+        if modal_aberto == 0 and tentativa > 0:
+            print("✅ [Atende] Modal fechou — captcha resolvido!")
+            await page.wait_for_timeout(3000)
+            if "sistema" in page.url:
+                return True
+
+        print(f"   Aguardando captcha... tentativa {tentativa+1}/15 | URL: {page.url[:60]}")
+
+    print("❌ [Atende] Captcha não resolvido após 15 tentativas")
+    await _screenshot_debug(page, "09_captcha_timeout")
+    return False
 
 
 # ============================================================
@@ -795,74 +722,76 @@ async def _aguardar_sistema_e_fechar_popup(page: Page):
 # PASSO 8: CARD "GERENCIAMENTO DE NOTAS"
 # ============================================================
 async def _abrir_gerenciamento_notas(page: Page) -> bool:
-    print("🗂️  [Atende] Procurando card 'Gerenciamento de Notas'...")
+    # CORREÇÃO v2.23: o log revelou que após o login aparece a janela IPM
+    # com links de serviços fiscais. O correto é clicar em um desses links
+    # para abrir o sistema de NFS-e. Os links disponíveis identificados:
+    #   - "Web Service de Emissão de Nota Fiscal Eletrônica"
+    #   - "Importação de Documentos Fiscais"
+    #   - "Gerenciamento de Notas" (pode aparecer após navegar)
+    #
+    # Estratégia: fecha a janela IPM e navega para a URL do sistema,
+    # ou clica no link correto dentro da janela IPM.
 
-    # Aguarda a tela do sistema carregar completamente
-    await page.wait_for_timeout(5000)
+    print("🗂️  [Atende] Navegando para o sistema de NFS-e...")
+    await page.wait_for_timeout(3000)
+    await _screenshot_debug(page, "12_pre_navegacao")
 
-    # DIAGNÓSTICO v2.14: imprime HTML e todos os links/botões/cards
-    # visíveis na tela pós-login para identificar seletores corretos
-    try:
-        elementos_visiveis = await page.evaluate("""
-            () => {
-                const results = [];
-                // Captura todos os elementos clicáveis
-                const sels = ['a', 'button', 'div[class*="card"]', 'li',
-                              'span[class*="menu"]', 'div[class*="menu"]',
-                              'div[class*="item"]', 'div[class*="servico"]',
-                              'div[class*="modulo"]', 'div[onclick]'];
-                sels.forEach(sel => {
-                    document.querySelectorAll(sel).forEach(el => {
-                        const txt = el.textContent.trim().substring(0, 60);
-                        if (txt && el.offsetParent !== null) {
-                            results.push({
-                                tag: el.tagName,
-                                class: el.className.substring(0, 80),
-                                text: txt,
-                                href: el.href || '',
-                                onclick: el.getAttribute('onclick') || ''
-                            });
-                        }
-                    });
-                });
-                return results.slice(0, 50); // primeiros 50 elementos
-            }
-        """)
-        print(f"📋 [Atende] Elementos visíveis pós-login ({len(elementos_visiveis)}):")
-        for el in elementos_visiveis:
-            print(f"   {el['tag']} | class='{el['class'][:50]}' | text='{el['text']}'")
-    except Exception as e:
-        print(f"⚠️  [Atende] Erro ao listar elementos: {e}")
-
-    html_sistema = await page.evaluate("""
-        () => document.body.innerHTML.substring(0, 5000)
+    # PASSO 1: fecha o popup de aviso de manutenção se ainda existir
+    await page.evaluate("""
+        () => {
+            const aviso = document.getElementById('aviso_manutencao');
+            if (aviso) aviso.style.cssText = 'display:none!important';
+        }
     """)
-    print(f"📄 [Atende] HTML sistema: {html_sistema}")
 
-    # Tenta seletores — serão ajustados após ver o HTML acima
-    for sel in ["text=Gerenciamento de Notas",
-                "a:has-text('Gerenciamento de Notas')",
-                "div:has-text('Gerenciamento de Notas')",
-                "[class*='card']:has-text('Gerenciamento')",
-                "text=Gerenciamento",
-                "text=Notas",
-                "a:has-text('Notas')",
-                "[class*='servico']:has-text('Nota')",
-                "[class*='item']:has-text('Nota')",
-                "[class*='modulo']:has-text('Nota')"]:
-        elem = page.locator(sel).first
-        if await elem.count() > 0:
-            try:
+    # PASSO 2: tenta navegar diretamente para o sistema via URL
+    # A URL do sistema após login é /?rot=1&aca=1#!/sistema/66
+    print("🌐 [Atende] Navegando para URL do sistema...")
+    try:
+        base_url = page.url.split('/autoatendimento')[0]
+        sistema_url = f"{base_url}/?rot=1&aca=1#!/sistema/66"
+        await page.goto(sistema_url, wait_until="networkidle", timeout=30000)
+        await page.wait_for_timeout(3000)
+        print(f"✅ [Atende] Navegou para: {page.url}")
+        await _screenshot_debug(page, "12_sistema_url")
+
+        # Verifica se chegou no sistema
+        if "sistema" in page.url or await page.locator("text=Gerenciamento").count() > 0:
+            print("✅ [Atende] Sistema carregado via URL direta")
+            return True
+    except Exception as e:
+        print(f"⚠️  [Atende] Navegação direta falhou: {e}")
+
+    # PASSO 3: tenta clicar nos links da janela IPM
+    seletores_ipm = [
+        "a:has-text('Gerenciamento de Notas')",
+        "a:has-text('Gerenciamento')",
+        # Links identificados nos logs
+        "a:has-text('Web Service de Emissão')",
+        "a:has-text('Importação de Documentos Fiscais')",
+        "a[href*='sistema']",
+        "a[href*='nfse']",
+        ".janela_ipm a",
+        ".container-servico-fiscal a",
+    ]
+
+    for sel in seletores_ipm:
+        try:
+            elem = page.locator(sel).first
+            if await elem.count() > 0:
+                href = await elem.get_attribute('href') or ''
+                texto = await elem.inner_text()
+                print(f"🖱️  [Atende] Clicando: '{texto.strip()[:50]}' ({sel})")
                 await elem.click(force=True, timeout=5000)
-                print(f"✅ [Atende] Card clicado: {sel}")
                 await page.wait_for_timeout(3000)
-                await _screenshot_debug(page, "12_gerenciamento")
+                await _screenshot_debug(page, "12_pos_clique_ipm")
+                print(f"✅ [Atende] URL após clique: {page.url}")
                 return True
-            except Exception as e:
-                print(f"⚠️  [Atende] Card falhou ({sel}): {e}")
+        except Exception as e:
+            print(f"⚠️  [Atende] Falhou ({sel}): {e}")
 
-    print("❌ [Atende] Card não encontrado")
-    await _screenshot_debug(page, "12_erro_card")
+    print("❌ [Atende] Não conseguiu navegar para o sistema")
+    await _screenshot_debug(page, "12_erro_navegacao")
     return False
 
 
@@ -1034,14 +963,12 @@ async def importar_via_atende(
                 "Veja logs /tmp/atende_debug_*.png no Railway."
             )
 
-        # 4: Acessar
-        await _clicar_acessar(page)
+        # 4: Clica Acessar e resolve captcha (fluxo real confirmado 01/05/2026)
+        captcha_ok = await _clicar_acessar_e_resolver_captcha(page)
+        if not captcha_ok:
+            print("⚠️  [Atende] Captcha não resolvido — tentando continuar mesmo assim")
 
-        # 5: Captcha
-        if not await _resolver_captcha(page):
-            raise Exception(
-                "Captcha de imagens detectado — resolução automática indisponível."
-            )
+        # 5: Captcha já resolvido em _clicar_acessar_e_resolver_captcha acima
 
         # 6-7: Sistema + popup
         await _aguardar_sistema_e_fechar_popup(page)
