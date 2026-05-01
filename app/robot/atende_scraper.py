@@ -155,6 +155,24 @@ async def criar_browser_atende():
     page = await context.new_page()
     page.set_default_timeout(60000)
 
+    # CORREÇÃO v2.21: intercepta respostas do reCAPTCHA para diagnóstico
+    # e tenta interceptar a validação para forçar aprovação do token.
+    async def handle_response(response):
+        if 'recaptcha' in response.url and 'userverify' in response.url:
+            try:
+                body = await response.text()
+                print(f"🔍 [Atende] reCAPTCHA userverify response: {body[:300]}")
+            except Exception:
+                pass
+        if 'recaptcha' in response.url and 'reload' in response.url:
+            try:
+                body = await response.text()
+                print(f"🔍 [Atende] reCAPTCHA reload response: {body[:300]}")
+            except Exception:
+                pass
+
+    page.on("response", handle_response)
+
     # CORREÇÃO v2.16: stealth NÃO aplicado aqui.
     # Aplicar stealth antes do goto() impede o jQuery/WPO de carregar
     # pois o stealth modifica objetos JS globais que o WPO depende.
@@ -601,12 +619,38 @@ async def _fazer_login(page: Page, portal_url: str, usuario: str, senha: str) ->
                     print(f"⚠️  [Atende] Captcha erro: {e}")
 
         # Verifica botão "Acessar" intermediário
+        # CORREÇÃO v2.21: injeta token ANTES de clicar no Acessar
         btn_acessar = page.locator("button:has-text('Acessar'), a:has-text('Acessar')").first
         if await btn_acessar.count() > 0:
-            print(f"🖱️  [Atende] Botão Acessar detectado na tentativa {t+1} — clicando...")
+            print(f"🖱️  [Atende] Botão Acessar na tentativa {t+1} — injetando token e clicando...")
             try:
+                # Re-injeta o token no g-recaptcha-response antes do clique
+                for frame in page.frames:
+                    if 'recaptcha' in frame.url and 'anchor' in frame.url:
+                        try:
+                            tk = await frame.evaluate(
+                                "() => { const el = document.getElementById('recaptcha-token'); return el ? el.value : null; }"
+                            )
+                            if tk:
+                                await page.evaluate(f"""
+                                    () => {{
+                                        let el = document.querySelector('[name="g-recaptcha-response"]');
+                                        if (!el) {{
+                                            el = document.createElement('textarea');
+                                            el.name = 'g-recaptcha-response';
+                                            el.style.display = 'none';
+                                            document.body.appendChild(el);
+                                        }}
+                                        el.value = '{tk}';
+                                    }}
+                                """)
+                                print(f"✅ [Atende] Token re-injetado antes do Acessar")
+                        except Exception:
+                            pass
+                        break
+
                 await btn_acessar.click(force=True, timeout=5000)
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(5000)
             except Exception as e:
                 print(f"⚠️  [Atende] Erro ao clicar Acessar: {e}")
 
