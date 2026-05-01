@@ -155,28 +155,34 @@ async def criar_browser_atende():
     page = await context.new_page()
     page.set_default_timeout(60000)
 
-    # CORREÇÃO v2.27: intercepta requests E responses para diagnóstico completo
+    # CORREÇÃO v2.29: intercepta TODOS os requests para descobrir
+    # o endpoint exato que o WPO usa para processar o login
     async def handle_request(request):
         url = request.url
-        if 'atende.net' in url and request.method == 'POST':
+        method = request.method
+        if method == 'POST':
             try:
                 post_data = request.post_data or ''
-                # Mascara a senha nos logs
-                log_data = post_data[:300].replace('Cad1234@', '****')
-                print(f"📤 [Atende] REQUEST POST: {url[-60:]} | dados: {log_data}")
-            except Exception:
-                pass
+                log_data = post_data[:400]
+                # Mascara senhas
+                for senha in ['Cad1234@', 'Clinica12@']:
+                    log_data = log_data.replace(senha, '****')
+                print(f"📤 [Atende] {method}: {url} | {log_data[:200]}")
+            except Exception as e:
+                print(f"📤 [Atende] {method}: {url} | erro: {e}")
+        elif 'atende.net' in url and method == 'GET' and any(
+            k in url for k in ['login', 'autent', 'acesso', 'security', 'session']
+        ):
+            print(f"📤 [Atende] GET relevante: {url}")
 
     async def handle_response(response):
         url = response.url
-        if 'atende.net' in url and response.request.method == 'POST':
+        if response.request.method == 'POST':
             try:
                 status = response.status
                 body = await response.text()
-                # Só loga POSTs relevantes (não imagens/css)
-                if any(k in url for k in ['processaDados', 'login', 'autent', 'Captcha', 'acesso']):
-                    print(f"📥 [Atende] RESPONSE POST ({status}): {url[-60:]}")
-                    print(f"   Body: {body[:400]}")
+                print(f"📥 [Atende] RESP POST ({status}): {url[-80:]}")
+                print(f"   Body: {body[:300]}")
             except Exception:
                 pass
         if 'recaptcha' in url and 'userverify' in url:
