@@ -60,28 +60,9 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
         # =========================
         print("🔐 Inicializando browser com certificado...")
 
-        certificado_base64 = payload["certificado_base64"]
-        certificado_senha  = payload["certificado_senha"]
-
-        # [NOVO CORREÇÃO] Remover prefixo data:...;base64, se o frontend enviar com ele.
-        # O FileReader do browser pode enviar: "data:application/x-pkcs12;base64,MIII..."
-        # Se não remover, o base64 fica inválido e o certificado não abre.
-        if isinstance(certificado_base64, str) and "base64," in certificado_base64:
-            certificado_base64 = certificado_base64.split("base64,")[1]
-            print("⚠️  Prefixo data:base64 removido do certificado")
-
-        # [NOVO CORREÇÃO] Garantir que a senha é string pura antes de passar ao browser.
-        # browser.py faz o .encode() internamente — se receber bytes já encoded,
-        # tenta fazer .encode() de novo e lança AttributeError.
-        if isinstance(certificado_senha, bytes):
-            certificado_senha = certificado_senha.decode("utf-8")
-            print("⚠️  Senha convertida de bytes para str")
-
-        print("🔐 Preparando certificado...")
-
         p, browser, context, page, cert_path, key_path = await criar_browser_com_certificado(
-            certificado_base64,
-            certificado_senha
+            payload["certificado_base64"],
+            payload["certificado_senha"]
         )
 
         print("🌐 Browser criado, iniciando consulta...")
@@ -120,7 +101,7 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
 
                         if SUPABASE_URL and SUPABASE_KEY:
                             # CAPTURE A URL RETORNADA AQUI
-                            nova_url = salvar_no_supabase(
+                            nova_url = salvar_no_supabase(                    
                                 payload["cliente_id"],
                                 periodo_str,
                                 nome_arquivo.replace(".xml", ""),
@@ -169,3 +150,5 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
 
         except Exception as e:
             print(f"Erro limpeza: {str(e)}")
+
+
