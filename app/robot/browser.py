@@ -5,23 +5,41 @@ from playwright.async_api import async_playwright
 from cryptography.hazmat.primitives.serialization import pkcs12, Encoding, PrivateFormat, NoEncryption
 
 
-async def criar_browser_com_certificado(certificado_base64: str, senha: str):
+async def criar_browser_com_certificado(certificado_base64: str, senha):
     print("🔐 Preparando certificado...")
 
     # 🔥 CORREÇÃO
     if not certificado_base64:
         raise Exception("Certificado não informado para criação do browser")
 
-    cert_bytes = base64.b64decode(certificado_base64)
+    # [NOVO CORREÇÃO] Remover prefixo data:...;base64, se presente.
+    # O FileReader do browser pode enviar com esse prefixo — sem remover,
+    # o base64.b64decode falha silenciosamente ou gera bytes corrompidos.
+    if isinstance(certificado_base64, str) and "base64," in certificado_base64:
+        certificado_base64 = certificado_base64.split("base64,")[1]
+        print("⚠️  Prefixo data:base64 removido do certificado")
 
     # ================================
     # 1. DECODIFICA CERTIFICADO
     # ================================
     cert_bytes = base64.b64decode(certificado_base64)
 
+    # [NOVO CORREÇÃO] Normalizar a senha para bytes antes de passar ao pkcs12.
+    # A biblioteca cryptography exige bytes. Tratamos todos os casos possíveis:
+    #   - str  → encode para bytes (caso normal vindo do JSON)
+    #   - bytes → usar diretamente (já convertido em alguma camada anterior)
+    #   - None  → usar bytes vazios b"" (certificado sem senha)
+    if isinstance(senha, bytes):
+        senha_bytes = senha
+    elif isinstance(senha, str):
+        senha_bytes = senha.encode("utf-8")
+    else:
+        senha_bytes = b""
+        print("⚠️  Senha não informada — usando bytes vazios")
+
     private_key, certificate, additional_certificates = pkcs12.load_key_and_certificates(
         cert_bytes,
-        senha.encode()
+        senha_bytes  # [NOVO CORREÇÃO] sempre bytes, nunca str ou None
     )
 
     # ================================
