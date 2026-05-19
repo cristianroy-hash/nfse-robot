@@ -2,6 +2,7 @@ import os
 import tempfile
 import traceback
 import shutil
+import base64  # [NOVO CORREÇÃO] necessário para decodificar base64 antes de passar ao browser
 
 from app.robot.browser import criar_browser_com_certificado
 from app.robot.consultar import consultar_notas, baixar_xml
@@ -60,9 +61,28 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
         # =========================
         print("🔐 Inicializando browser com certificado...")
 
+        # [NOVO CORREÇÃO] A biblioteca cryptography atualizou e passou a exigir
+        # que a senha seja bytes, não string. Anteriormente aceitava string
+        # diretamente; agora lança TypeError se receber str.
+        # Convertemos a senha para bytes antes de passar ao browser,
+        # mantendo compatibilidade com versões anteriores via isinstance().
+        certificado_base64 = payload["certificado_base64"]
+        certificado_senha  = payload["certificado_senha"]
+
+        # [NOVO CORREÇÃO] Garantir que a senha é bytes
+        if isinstance(certificado_senha, str):
+            certificado_senha = certificado_senha.encode("utf-8")
+
+        # [NOVO CORREÇÃO] Garantir que o base64 não tem prefixo data:...;base64,
+        # O FileReader do browser pode enviar com prefixo — removemos se existir
+        if isinstance(certificado_base64, str) and "base64," in certificado_base64:
+            certificado_base64 = certificado_base64.split("base64,")[1]
+
+        print("🔐 Preparando certificado...")
+
         p, browser, context, page, cert_path, key_path = await criar_browser_com_certificado(
-            payload["certificado_base64"],
-            payload["certificado_senha"]
+            certificado_base64,
+            certificado_senha  # agora sempre bytes
         )
 
         print("🌐 Browser criado, iniciando consulta...")
@@ -101,7 +121,7 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
 
                         if SUPABASE_URL and SUPABASE_KEY:
                             # CAPTURE A URL RETORNADA AQUI
-                            nova_url = salvar_no_supabase(                    
+                            nova_url = salvar_no_supabase(
                                 payload["cliente_id"],
                                 periodo_str,
                                 nome_arquivo.replace(".xml", ""),
@@ -150,5 +170,3 @@ async def executar_importacao(job_id: str, payload: dict, jobs: dict):
 
         except Exception as e:
             print(f"Erro limpeza: {str(e)}")
-
-
