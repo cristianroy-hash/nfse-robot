@@ -34,18 +34,32 @@ async def consultar_notas(page, data_inicio: str, data_fim: str):
                 if await btn_cert.count() > 0:
                     print("Na tela de login. Clicando no botão Certificado...")
                     await btn_cert.click()
-                    await page.wait_for_timeout(8000)
+
+                    # [NOVO CORREÇÃO] Aumentado de 8000ms para 20000ms.
+                    # O portal gov.br pode demorar mais de 8s para processar
+                    # o login via certificado digital, especialmente em
+                    # horários de pico — causando timeout no #datainicio.
+                    await page.wait_for_timeout(20000)
 
                     await page.goto(
                         "https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas",
-                        wait_until="networkidle"
+                        wait_until="networkidle",
+                        timeout=90000  # [NOVO CORREÇÃO] timeout explícito adicionado
                     )
+
+                    # [NOVO CORREÇÃO] Aguardar estabilização após redirect
+                    await page.wait_for_timeout(5000)
+
                 else:
                     raise Exception("❌ Não foi possível realizar o login via Certificado.")
 
         print("Aguardando campo de data inicial aparecer...")
         campo_ini = page.locator("#datainicio")
-        await campo_ini.wait_for(state="visible", timeout=30000)
+
+        # [NOVO CORREÇÃO] Aumentado de 30000ms para 60000ms.
+        # O campo #datainicio pode demorar mais após login via certificado
+        # em ambientes cloud (Railway) com IPs diferentes do portal.
+        await campo_ini.wait_for(state="visible", timeout=60000)
 
         # =========================
         # FILTRO
